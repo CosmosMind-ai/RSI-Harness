@@ -1,0 +1,13 @@
+{
+  "component_schema_version": "1",
+  "component_id": "commands",
+  "config": {
+    "prompt_templates": [
+      {
+        "name": "run-status",
+        "description": "Inspect an experiment's real progress and blockers.",
+        "content": "Inspect the experiment identified by `$1`, or infer the active run from the current context. Do not modify or restart it. Read the live process state, code revision, dataset/model/config identity, checkpoint stage, completed result artifacts, recent error logs, disk/GPU/provider state, and the basis for any ETA. Distinguish scheduled, running, completed, failed, and unknown work. Report observed facts first, then the likely blocker and safest next action; never print credentials."
+      }
+    ]
+  }
+}

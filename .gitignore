@@ -1,0 +1,8 @@
+.env
+.DS_Store
+.obsidian/
+.runs/
+dist/
+node_modules/
+references/papers/
+references/repos/

@@ -1,0 +1,41 @@
+{
+  "name": "rsih",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "piConfig": {
+    "name": "rsih",
+    "configDir": ".rsih"
+  },
+  "bin": {
+    "gee": "./dist/src/gee/cli.js",
+    "rsih": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "agent": "node --experimental-strip-types src/cli.ts",
+    "build": "tsc -p tsconfig.build.json && node --experimental-strip-types scripts/copy-build-assets.ts",
+    "build:binary": "node --experimental-strip-types scripts/build-binary.ts",
+    "sync:contracts": "node --experimental-strip-types scripts/sync-contracts.ts",
+    "install:binary": "node --experimental-strip-types scripts/build-binary.ts --install",
+    "smoke:binary": "node --experimental-strip-types scripts/smoke-binary.ts",
+    "gee": "node --experimental-strip-types src/gee/cli.ts",
+    "smoke:model": "node --experimental-strip-types examples/model-smoke.ts",
+    "test": "node --experimental-strip-types --test test/core-harness.test.ts test/cli.test.ts test/model-runtime.test.ts test/settings-layer.test.ts test/pi-surface.test.ts test/harness-rsi-genome.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@earendil-works/pi-tui": "0.84.3",
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}

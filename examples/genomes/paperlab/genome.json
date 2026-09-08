@@ -1,0 +1,27 @@
+{
+  "genome_schema_version": "3",
+  "genome_id": "harness:paperlab",
+  "base": "default",
+  "components": [
+    {
+      "id": "instructions",
+      "source": "./components/instructions.json",
+      "contract": "./contracts/instructions.dev.md"
+    },
+    {
+      "id": "skills",
+      "source": "./components/skills.json",
+      "contract": "./contracts/skills.dev.md"
+    },
+    {
+      "id": "commands",
+      "source": "./components/commands.json",
+      "contract": "./contracts/commands.dev.md"
+    },
+    {
+      "id": "resources",
+      "source": "./components/resources.json",
+      "contract": "./contracts/resources.dev.md"
+    }
+  ]
+}

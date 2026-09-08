@@ -1,0 +1,13 @@
+{
+  "component_schema_version": "1",
+  "component_id": "runtime",
+  "config": {
+    "runtime": {
+      "tool_execution": "sequential",
+      "steering_mode": "one-at-a-time",
+      "follow_up_mode": "one-at-a-time",
+      "max_turns": 120,
+      "thinking_level": "xhigh"
+    }
+  }
+}

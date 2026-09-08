@@ -1,0 +1,10 @@
+{
+  "component_schema_version": "1",
+  "component_id": "integrations",
+  "config": {
+    "extensions": ["./extension/harness-rsi.ts"],
+    "mcp": {
+      "servers": []
+    }
+  }
+}

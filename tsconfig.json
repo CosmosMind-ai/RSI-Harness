@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/cli.ts",
+    "src/pi-cli-runtime.ts",
+    "src/index.ts",
+    "src/cli/**/*.ts",
+    "src/core/**/*.ts",
+    "src/harness/**/*.ts",
+    "src/model/**/*.ts",
+    "src/gee/cli.ts"
+  ],
+  "exclude": [
+    "dist/**",
+    ".runs/**"
+  ]
+}

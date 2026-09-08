@@ -1,0 +1,20 @@
+{
+  "component_schema_version": "1",
+  "component_id": "skills",
+  "config": {
+    "skills": [
+      {
+        "source": "./skills/research-experiment-scout",
+        "enabled": true
+      },
+      {
+        "source": "./skills/experiment-bootstrap",
+        "enabled": true
+      },
+      {
+        "source": "./skills/experiment-run-ops",
+        "enabled": true
+      }
+    ]
+  }
+}

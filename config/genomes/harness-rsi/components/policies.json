@@ -1,0 +1,44 @@
+{
+  "component_schema_version": "1",
+  "component_id": "policies",
+  "config": {
+    "policies": {
+      "tool": {
+        "blocked_tools": [],
+        "max_result_chars": 40000
+      },
+      "scratchpad": {
+        "enabled": true,
+        "max_entries": 128,
+        "max_value_chars": 8000
+      },
+      "compaction": {
+        "enabled": true,
+        "reserveTokens": 32000,
+        "keepRecentTokens": 16000
+      }
+    },
+    "memory": {
+      "policy": {
+        "retrieve": true,
+        "top_k": 8
+      },
+      "snapshot": {
+        "entries": [
+          {
+            "kind": "knowledge",
+            "content": "An absent Genome field inherits Pi's default. Leaving a field out is the safe answer; inventing a value is not."
+          },
+          {
+            "kind": "positive_pattern",
+            "content": "Aggregate session evidence with bash before reading transcripts, and cite a count or a quoted line for every proposed Genome change."
+          },
+          {
+            "kind": "anti_pattern",
+            "content": "Do not read whole session files into context, and do not propose a skill, tool, or MCP server that no transcript evidence supports."
+          }
+        ]
+      }
+    }
+  }
+}

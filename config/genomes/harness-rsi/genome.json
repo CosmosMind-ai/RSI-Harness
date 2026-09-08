@@ -1,0 +1,44 @@
+{
+  "genome_schema_version": "3",
+  "genome_id": "harness:harness-rsi",
+  "parent_id": "harness:default-v0",
+  "version": 1,
+  "base": "default",
+  "components": [
+    {
+      "id": "instructions",
+      "source": "./components/instructions.json",
+      "contract": "./contracts/instructions.dev.md"
+    },
+    {
+      "id": "tools",
+      "source": "./components/tools.json",
+      "contract": "./contracts/tools.dev.md"
+    },
+    {
+      "id": "skills",
+      "source": "./components/skills.json",
+      "contract": "./contracts/skills.dev.md"
+    },
+    {
+      "id": "integrations",
+      "source": "./components/integrations.json",
+      "contract": "./contracts/integrations.dev.md"
+    },
+    {
+      "id": "runtime",
+      "source": "./components/runtime.json",
+      "contract": "./contracts/runtime.dev.md"
+    },
+    {
+      "id": "policies",
+      "source": "./components/policies.json",
+      "contract": "./contracts/policies.dev.md"
+    },
+    {
+      "id": "resources",
+      "source": "./components/resources.json",
+      "contract": "./contracts/resources.dev.md"
+    }
+  ]
+}

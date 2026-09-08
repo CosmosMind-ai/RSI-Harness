@@ -1,0 +1,12 @@
+{
+  "component_schema_version": "1",
+  "component_id": "skills",
+  "config": {
+    "skills": [
+      {
+        "source": "./skills/genome-authoring",
+        "enabled": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "component_schema_version": "1",
+  "component_id": "tools",
+  "config": {
+    "tools": [
+      { "name": "read", "enabled": true },
+      { "name": "write", "enabled": true },
+      { "name": "edit", "enabled": true },
+      { "name": "bash", "enabled": true },
+      { "name": "grep", "enabled": true },
+      { "name": "find", "enabled": true },
+      { "name": "ls", "enabled": true }
+    ]
+  }
+}

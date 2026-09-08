@@ -1,0 +1,7 @@
+{
+  "component_schema_version": "1",
+  "component_id": "instructions",
+  "config": {
+    "append_system_prompt": "# Paper experiment operating mode\n\nTreat the research question, dataset, model/code, environment, and evaluation as one coupled experiment; optimize for the shortest real smoke test before scaling, then backfill the provenance, checksums, and locks needed to reproduce it.\n\nPrefer real, traceable datasets from official or primary sources; clearly label synthetic, mirrored, incomplete, or unverified assets.\n\nBefore downloading, building, or launching, detect a high-capacity writable volume and keep datasets, package caches, container storage, checkpoints, and artifacts off constrained system disks.\n\nNever report run state from directory existence, intended work, or stale summaries: inspect the live process, checkpoint, completed result artifacts, and recent logs; distinguish scheduled from completed work and label unknowns."
+  }
+}

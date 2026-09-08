@@ -1,0 +1,52 @@
+{
+  "gpt": {
+    "kind": "http",
+    "api": "openai-responses",
+    "provider": "openai",
+    "model_env": "GPT_MODEL",
+    "base_url_env": "GPT_API_BASE_URL",
+    "api_key_env": "GPT_API_KEY",
+    "reasoning": true,
+    "input": ["text"],
+    "context_window": 128000,
+    "max_tokens": 16384,
+    "capabilities": {
+      "tools": true,
+      "structured_output": true,
+      "streaming": true,
+      "reasoning": true,
+      "images": false,
+      "usage": true
+    }
+  },
+  "local": {
+    "kind": "http",
+    "api": "openai-completions",
+    "provider": "local",
+    "model_env": "LOCAL_MODEL_ID",
+    "base_url_env": "LOCAL_MODEL_BASE_URL",
+    "api_key_env": "LOCAL_MODEL_API_KEY",
+    "allow_unauthenticated": true,
+    "reasoning": true,
+    "input": ["text"],
+    "context_window": 65536,
+    "max_tokens": 24576,
+    "timeout_ms": 3600000,
+    "chat_template_kwargs": {
+      "enable_thinking": true
+    },
+    "compat": {
+      "supportsDeveloperRole": false,
+      "supportsReasoningEffort": false,
+      "supportsStrictMode": false
+    },
+    "capabilities": {
+      "tools": true,
+      "structured_output": false,
+      "streaming": true,
+      "reasoning": true,
+      "images": false,
+      "usage": true
+    }
+  }
+}
