@@ -32,8 +32,11 @@ rsih :paperlab
    `harness-rsi` sibling inside `~/.rsih/genomes/`. That sibling does not exist
    in `examples/genomes/`, so copy the referenced contract files into your
    bundle (e.g. `contracts/<id>.dev.md`) and point the manifest at them.
-3. **A unique `genome_id`.** It is what keeps an installed copy from ever being
-   overwritten by a same-name Genome from someone else.
+3. **A unique `genome_id`.** The directory name is an address, not an identity
+   — anyone can name a Genome `paperlab`. The `genome_id` travels inside the
+   manifest, and it is what lets a seed refresh tell "an older copy of this
+   same Genome" apart from "a different Genome that happens to share the
+   name": the first is refreshed, the second is never touched.
 4. **`rsih genome validate examples/genomes/<name>` passes** — run from a clone
    of this repo, before opening the PR.
 5. **No private residue.** A Genome is distilled from your own transcripts;

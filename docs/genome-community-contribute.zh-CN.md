@@ -29,8 +29,10 @@ rsih :paperlab
    `~/.rsih/genomes/` 里的 `harness-rsi` 兄弟目录。`examples/genomes/` 下没有
    这个兄弟，所以把引用到的 contract 文件拷进你的 bundle（例如
    `contracts/<id>.dev.md`），manifest 改指它。
-3. **唯一的 `genome_id`。** 它保证别人分享的同名 Genome 永远不会覆盖你已
-   安装的副本。
+3. **唯一的 `genome_id`。** 目录名只是地址，不是身份——谁都可以把自己的 Genome
+   叫 `paperlab`。`genome_id` 写在 manifest 里、随 bundle 一起流转；种子刷新靠
+   它区分「同一 Genome 的旧副本」和「恰好同名的另一个 Genome」：前者刷新，后者
+   永不触碰。
 4. **`rsih genome validate examples/genomes/<name>` 通过**——在本仓库的
    clone 里、开 PR 之前跑一遍。
 5. **不留隐私残留。** Genome 蒸馏自你自己的 transcript；分享前先清掉绝对
