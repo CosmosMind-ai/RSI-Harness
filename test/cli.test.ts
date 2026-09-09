@@ -8,7 +8,7 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -195,7 +195,7 @@ test("RSIH TUI header includes DNA logo and runtime identity", () => {
   const lines = rsiHeaderLines(
     60,
     {
-      cwd: "/Users/lx/project",
+      cwd: join(homedir(), "project"),
       model: "gpt-5.6-sol",
       genome: "coding",
       version: "0.1.0",
@@ -218,7 +218,7 @@ test("RSIH TUI header lists the loaded resources and nothing transient", () => {
   const lines = rsiHeaderLines(
     60,
     {
-      cwd: "/Users/lx/project",
+      cwd: join(homedir(), "project"),
       model: "gpt-5.6-sol",
       genome: "coding",
       version: "0.1.0",
@@ -247,7 +247,7 @@ test("RSIH TUI keeps a fixed column divider and compacts long workspaces", () =>
   const lines = rsiHeaderLines(
     120,
     {
-      cwd: "/Users/lx/Documents/cosmos/dopapers/rsih",
+      cwd: join(homedir(), "Documents/cosmos/dopapers/rsih"),
       model: "gpt-5.6-sol",
       genome: "default",
       version: "0.1.0",
