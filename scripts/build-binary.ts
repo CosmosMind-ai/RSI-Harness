@@ -16,14 +16,33 @@ const outputDirectory = resolve("dist");
 const outputPath = join(outputDirectory, executableName);
 mkdirSync(outputDirectory, { recursive: true });
 
-const build = spawnSync(
-  "bun",
-  ["build", "src/cli.ts", "--compile", "--outfile", outputPath],
-  {
+// Direct spawn works when a real bun.exe is on the PATH (official installer).
+// When bun came from npm, the PATH entry is a shell-script shim
+// (`bun.cmd`/`bun.sh`) that Node cannot spawn without a shell, so retry
+// through one.
+function runBun(args: string[]) {
+  const command = process.platform === "win32" ? "bun.exe" : "bun";
+  const direct = spawnSync(command, args, {
     cwd: process.cwd(),
     stdio: "inherit",
-  },
-);
+  });
+  if (direct.error?.code === "ENOENT" && process.platform === "win32") {
+    return spawnSync("bun", args, {
+      cwd: process.cwd(),
+      stdio: "inherit",
+      shell: true,
+    });
+  }
+  return direct;
+}
+
+const build = runBun([
+  "build",
+  "src/cli.ts",
+  "--compile",
+  "--outfile",
+  outputPath,
+]);
 
 if (build.error?.code === "ENOENT") {
   throw new Error(

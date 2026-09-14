@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
@@ -544,7 +545,7 @@ test("installing from a path lands under the bundle's own name", async () => {
   await withHome(home, () => {
     assert.match(
       runGenome(["install", "examples/genomes/paperlab"], cwd),
-      /Installed paperlab to .*[/]genomes[/]paperlab[/]genome\.json$/,
+      /Installed paperlab to .*[/\\]genomes[/\\]paperlab[/\\]genome\.json$/,
     );
   });
 
@@ -598,7 +599,11 @@ function fakePi() {
 }
 
 async function loadExtension() {
-  const module = await import(join(bundle, "extension", "harness-rsi.ts"));
+  // On Windows a bare absolute path is not a valid ESM URL; import() needs
+  // the file:// form (pathToFileURL) there.
+  const module = await import(
+    pathToFileURL(join(bundle, "extension", "harness-rsi.ts")).href
+  );
   const pi = fakePi();
   module.default(pi);
   return pi;
@@ -725,12 +730,16 @@ function writePiHome() {
 }
 
 async function withHome(home, run) {
+  // On Windows os.homedir() reads USERPROFILE, not HOME, so both must point at
+  // the fake home or the session stores resolve into the real user directory.
   const previous = {
     HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
     RSIH_CODING_AGENT_DIR: process.env.RSIH_CODING_AGENT_DIR,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
   };
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   // Both spellings, because the agent-dir variable is named after the app name
   // resolved from whichever package.json is on PI_PACKAGE_DIR.
   process.env.RSIH_CODING_AGENT_DIR = join(home, ".rsih");
@@ -1094,7 +1103,7 @@ test("AskUserQuestion normalises plain-string option lists", async () => {
 
 test("the ported dialog renders without a module-level theme singleton", async () => {
   const { AskUserQuestionDialog } = await import(
-    join(bundle, "extension", "ask-user-question-dialog.ts")
+    pathToFileURL(join(bundle, "extension", "ask-user-question-dialog.ts")).href
   );
   // The dialog takes its theme through the constructor, but Pi's shared
   // `keyHint` helpers still read the process-wide theme that a real TUI session
@@ -1132,7 +1141,7 @@ test("the ported dialog renders without a module-level theme singleton", async (
  */
 test("an options question always offers Other", async () => {
   const { AskUserQuestionDialog } = await import(
-    join(bundle, "extension", "ask-user-question-dialog.ts")
+    pathToFileURL(join(bundle, "extension", "ask-user-question-dialog.ts")).href
   );
   initTheme();
   const theme = {
