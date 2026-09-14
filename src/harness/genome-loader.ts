@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -160,6 +161,12 @@ export function installGenomeBundle(manifestPath, name, homeDirectory = homedir(
   const source = isBundle ? dirname(manifestPath) : manifestPath;
   const directory = userGenomeDirectory(homeDirectory);
   const target = join(directory, isBundle ? name : `${name}.json`);
+  if (existsSync(target) && realpathSync(source) === realpathSync(target)) {
+    return {
+      path: isBundle ? join(target, GENOME_MANIFEST_NAME) : target,
+      replaced: undefined,
+    };
+  }
   mkdirSync(directory, { recursive: true });
 
   // `<name>.json` is looked up before `<name>/genome.json`, so installing a
