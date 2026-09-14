@@ -438,6 +438,40 @@ test("installing over a shadowing single-file copy is not a silent no-op", () =>
   assert.equal(after.outdated, false);
 });
 
+test("repeated installs preserve every shadowing single-file backup", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rsih-backup-history-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const shipped = writeShippedSeed(root, "fixture", "shipped");
+  const genomes = join(home, ".rsih", "genomes");
+  mkdirSync(genomes, { recursive: true });
+  const single = join(genomes, "fixture.json");
+  const backups = [];
+
+  for (const prompt of ["first", "second", "third"]) {
+    const contents = JSON.stringify({
+      genome_schema_version: "2",
+      genome_id: "harness:fixture",
+      append_system_prompt: prompt,
+    });
+    writeFileSync(single, contents, "utf8");
+    const installed = installGenomeBundle(join(shipped, GENOME_MANIFEST_NAME), "fixture", home);
+    backups.push({ path: installed.replaced, contents });
+    assert.ok(!existsSync(single));
+    for (const backup of backups) {
+      assert.equal(readFileSync(backup.path, "utf8"), backup.contents);
+    }
+  }
+
+  assert.equal(backups[0].path, `${single}.replaced`);
+  assert.equal(new Set(backups.map((backup) => backup.path)).size, 3);
+  assert.equal(resolveHarnessGenome("fixture", {
+    cwd: root,
+    homeDirectory: home,
+    packageDirectory: root,
+  }).genome.append_system_prompt, "shipped");
+});
+
 test("the startup notice matches what the loader actually did", () => {
   assert.equal(genomeSeedNotice({ seeded: false, refreshed: false, outdated: false }, "x"), undefined);
   assert.match(
