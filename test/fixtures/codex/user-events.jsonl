@@ -1,0 +1,9 @@
+{"timestamp":"2026-09-01T12:00:00.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-09-01T12:00:00.000Z","cwd":"/workspace/研究 project","originator":"codex_cli_rs","source":"cli","base_instructions":{"text":"synthetic base instructions"}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md: synthetic injected instructions"}]}}
+{"type":"turn_context","payload":{"cwd":"/workspace/other-context"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Build a slide deck","images":[]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build a slide deck"}]}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture","output":"synthetic-tool-output-do-not-copy"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"synthetic assistant response"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Build a slide deck"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"<tag> is literal user input"}}

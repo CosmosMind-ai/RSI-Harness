@@ -2,12 +2,13 @@
  * Session readers for the harnesses a user actually arrives with.
  *
  * Almost nobody has RSIH history on the day they first run this Genome, so the
- * evidence has to come from wherever they have been working. Three stores are
+ * evidence has to come from wherever they have been working. Four stores are
  * supported today:
  *
  *   rsih    <agentDir>/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   pi      ~/.pi/agent/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   claude  ~/.claude/projects/<encoded cwd>/<uuid>.jsonl
+ *   codex   $CODEX_HOME/sessions/YYYY/MM/DD/*.jsonl (+ archived_sessions)
  *
  * RSIH and Pi share a schema. Claude Code's differs enough to need its own
  * reader but is shaped the same way: a JSONL file per session under a directory
@@ -18,10 +19,9 @@
  *
  * Every read is bounded. These stores get large -- the Pi store on the machine
  * this was written against held 117 MB across 152 sessions -- so transcripts are
- * never read whole. Each file contributes its head only, which is where the cwd
- * and the opening user turns live. Measured on the same machine, Claude's first
- * real user turn sits 424 bytes in at the median and 1.4 KB in at the worst, so
- * the head window is not a practical limit for either format.
+ * sampled from their heads. Pi and Claude use 64 KiB; Codex uses 2 MiB because
+ * injected context can precede the first real user turn. Limits and malformed
+ * records are reported rather than presented as complete evidence.
  *
  * No model calls happen here, and no transcript body is returned to the caller.
  */
@@ -29,9 +29,11 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   openSync,
   readdirSync,
   readSync,
+  realpathSync,
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -40,14 +42,21 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Head window for a transcript we have to parse ourselves. */
 const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
-/** Smaller window for when only the `session` header is needed. */
-const META_HEAD_BYTES = 16 * 1024;
+const CODEX_HEAD_BYTES = 2 * 1024 * 1024;
 /** Prompts retained per session. Enough to characterise it, bounded for memory. */
 const MAX_PROMPTS = 40;
 /** Characters retained per prompt. */
 const MAX_PROMPT_CHARS = 600;
 
 const CWD_FIELD = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+
+export type SamplingIssue =
+  | "byte_limit"
+  | "prompt_limit"
+  | "prompt_truncated"
+  | "malformed_json"
+  | "read_error"
+  | "no_user_events";
 
 export interface SessionRecord {
   /** Source id: one of SESSION_SOURCES, or `custom` for a user-named root. */
@@ -60,8 +69,9 @@ export interface SessionRecord {
   modified: Date;
   /** The user's own turns, truncated and capped. */
   prompts: string[];
-  /** True when `prompts` is the complete set rather than a head sample. */
+  /** True when all text prompts were read and retained without truncation. */
   promptsComplete: boolean;
+  samplingIssues: SamplingIssue[];
 }
 
 export interface SourceScan {
@@ -70,12 +80,23 @@ export interface SourceScan {
   roots: string[];
   available: boolean;
   sessions: number;
+  skippedFiles: number;
 }
 
 export interface ScanResult {
   sources: SourceScan[];
   records: SessionRecord[];
   unknownSources: string[];
+  skippedFiles: number;
+}
+
+interface ReadContext {
+  seen: Set<string>;
+  skippedFiles: number;
+}
+
+function readContext(): ReadContext {
+  return { seen: new Set(), skippedFiles: 0 };
 }
 
 /* ------------------------------------------------------------------ plumbing */
@@ -88,25 +109,33 @@ function isDirectory(path: string) {
   }
 }
 
-/** Read at most `bytes` from the start of a file. Never throws. */
+/** Read at most `bytes` from a regular file, closing it even on errors. */
 function readHead(path: string, bytes: number) {
   let fd;
   try {
     fd = openSync(path, "r");
-    const buffer = Buffer.allocUnsafe(bytes);
-    const read = readSync(fd, buffer, 0, bytes, 0);
-    // A window can end mid-character; the trailing replacement character is
-    // harmless because every consumer parses whole lines or matches a regex.
-    return buffer.subarray(0, read).toString("utf8");
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return undefined;
+    const buffer = Buffer.allocUnsafe(Math.min(bytes, stat.size));
+    let read = 0;
+    while (read < buffer.length) {
+      const count = readSync(fd, buffer, read, buffer.length - read, read);
+      if (count === 0) break;
+      read += count;
+    }
+    return {
+      text: buffer.subarray(0, read).toString("utf8"),
+      complete: read === fstatSync(fd).size,
+    };
   } catch {
-    return "";
+    return undefined;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
 }
 
 /** Transcript files under a root, depth-bounded. */
-function transcriptFiles(root: string, depth: number): string[] {
+function transcriptFiles(root: string, depth: number, compressed = false): string[] {
   if (depth < 0 || !existsSync(root) || !isDirectory(root)) return [];
   let entries: string[];
   try {
@@ -118,28 +147,41 @@ function transcriptFiles(root: string, depth: number): string[] {
   for (const name of entries) {
     if (name.startsWith(".")) continue;
     const path = join(root, name);
-    if (name.endsWith(".jsonl")) {
+    if (name.endsWith(".jsonl") || (compressed && name.endsWith(".jsonl.zst"))) {
       files.push(path);
     } else if (isDirectory(path)) {
-      files.push(...transcriptFiles(path, depth - 1));
+      files.push(...transcriptFiles(path, depth - 1, compressed));
     }
   }
   return files;
 }
 
-function parseLines(text: string) {
+function readTranscriptHead(path: string, bytes = TRANSCRIPT_HEAD_BYTES) {
+  const head = readHead(path, bytes);
+  const issues = new Set<SamplingIssue>();
   const entries: any[] = [];
+  if (!head) {
+    issues.add("read_error");
+    return { entries, issues, text: "" };
+  }
+  let text = head.text;
+  if (!head.complete) {
+    issues.add("byte_limit");
+    // Never interpret a line cut by the byte window (including mid-UTF-8).
+    text = text.slice(0, text.lastIndexOf("\n") + 1);
+  }
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
-    // The last line of a head window is usually truncated.
-    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    if (!trimmed) continue;
     try {
-      entries.push(JSON.parse(trimmed));
+      const entry = JSON.parse(trimmed);
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) entries.push(entry);
+      else issues.add("malformed_json");
     } catch {
-      /* a line we cannot read tells us nothing */
+      issues.add("malformed_json");
     }
   }
-  return entries;
+  return { entries, issues, text: head.text };
 }
 
 function clean(text: unknown) {
@@ -147,18 +189,24 @@ function clean(text: unknown) {
     .replace(/\s+/g, " ")
     .trim();
   if (!flat) return "";
-  return flat.length > MAX_PROMPT_CHARS ? `${flat.slice(0, MAX_PROMPT_CHARS)}...` : flat;
+  return flat;
 }
 
-function push(prompts: string[], text: unknown) {
-  if (prompts.length >= MAX_PROMPTS) return;
+function push(prompts: string[], text: unknown, issues: Set<SamplingIssue>) {
   const value = clean(text);
-  if (value) prompts.push(value);
+  if (!value) return;
+  if (prompts.length >= MAX_PROMPTS) {
+    issues.add("prompt_limit");
+    return;
+  }
+  if (value.length > MAX_PROMPT_CHARS) issues.add("prompt_truncated");
+  prompts.push(value.length > MAX_PROMPT_CHARS ? `${value.slice(0, MAX_PROMPT_CHARS)}...` : value);
 }
 
 function fileStat(path: string) {
   try {
     const stat = statSync(path);
+    if (!stat.isFile()) return undefined;
     return { bytes: stat.size, modified: stat.mtime, created: stat.birthtime ?? stat.mtime };
   } catch {
     return undefined;
@@ -198,15 +246,14 @@ function piUserText(content: unknown) {
 function readPiTranscript(path: string, source: string): SessionRecord | undefined {
   const stat = fileStat(path);
   if (!stat) return undefined;
-  const entries = parseLines(readHead(path, TRANSCRIPT_HEAD_BYTES));
+  const { entries, issues, text } = readTranscriptHead(path);
   const meta = entries.find((entry) => entry.type === "session");
-  const cwd = meta?.cwd ?? extractCwd(readHead(path, META_HEAD_BYTES));
-  if (!cwd) return undefined;
+  const cwd = meta?.cwd ?? extractCwd(text);
+  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
   const prompts: string[] = [];
   for (const entry of entries) {
     if (entry.type !== "message" || entry.message?.role !== "user") continue;
-    push(prompts, piUserText(entry.message.content));
-    if (prompts.length >= MAX_PROMPTS) break;
+    push(prompts, piUserText(entry.message.content), issues);
   }
   return {
     source,
@@ -216,21 +263,44 @@ function readPiTranscript(path: string, source: string): SessionRecord | undefin
     created: timestamp(meta?.timestamp, stat.created),
     modified: stat.modified,
     prompts,
-    // The head window only reaches the opening turns of a long session.
-    promptsComplete: stat.bytes <= TRANSCRIPT_HEAD_BYTES,
+    promptsComplete: issues.size === 0,
+    samplingIssues: [...issues],
   };
 }
 
-function readPiStore(roots: string[], source: string) {
+function readStore(
+  roots: string[],
+  source: string,
+  reader: (path: string, source: string) => SessionRecord | undefined,
+  depth: number,
+  context = readContext(),
+) {
   const records: SessionRecord[] = [];
   for (const root of roots) {
-    // `root/--encoded cwd--/*.jsonl`, and a root may itself be one such directory.
-    for (const file of transcriptFiles(root, 2)) {
-      const record = readPiTranscript(file, source);
-      if (record) records.push(record);
+    for (const file of transcriptFiles(root, depth, source === "codex")) {
+      let identity: string;
+      try {
+        identity = realpathSync(file);
+      } catch {
+        context.skippedFiles += 1;
+        continue;
+      }
+      if (context.seen.has(identity)) continue;
+      context.seen.add(identity);
+      // Compressed Codex rollouts are outside this reader's supported format.
+      const record = file.endsWith(".jsonl.zst") ? undefined : reader(file, source);
+      if (record) {
+        records.push(record);
+      } else {
+        context.skippedFiles += 1;
+      }
     }
   }
   return records;
+}
+
+function readPiStore(roots: string[], source: string, context = readContext()) {
+  return readStore(roots, source, readPiTranscript, 2, context);
 }
 
 /* ------------------------------------------------- Claude Code transcripts */
@@ -255,19 +325,18 @@ function isClaudeTypedTurn(entry: any) {
 function readClaudeTranscript(path: string, source: string): SessionRecord | undefined {
   const stat = fileStat(path);
   if (!stat) return undefined;
-  const entries = parseLines(readHead(path, TRANSCRIPT_HEAD_BYTES));
+  const { entries, issues, text } = readTranscriptHead(path);
   // The encoded directory name is lossy for paths that already contain dashes,
   // so take the cwd the entries carry.
   const located = entries.find((entry) => typeof entry.cwd === "string" && entry.cwd);
-  const cwd = located?.cwd ?? extractCwd(readHead(path, META_HEAD_BYTES));
-  if (!cwd) return undefined;
+  const cwd = located?.cwd ?? extractCwd(text);
+  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
   const prompts: string[] = [];
   let first;
   for (const entry of entries) {
     if (!isClaudeTypedTurn(entry)) continue;
     first ??= entry.timestamp;
-    push(prompts, entry.message.content);
-    if (prompts.length >= MAX_PROMPTS) break;
+    push(prompts, entry.message.content, issues);
   }
   return {
     source,
@@ -277,19 +346,60 @@ function readClaudeTranscript(path: string, source: string): SessionRecord | und
     created: timestamp(first ?? located?.timestamp, stat.created),
     modified: stat.modified,
     prompts,
-    promptsComplete: stat.bytes <= TRANSCRIPT_HEAD_BYTES,
+    promptsComplete: issues.size === 0,
+    samplingIssues: [...issues],
   };
 }
 
-function readClaudeStore(roots: string[], source: string) {
-  const records: SessionRecord[] = [];
-  for (const root of roots) {
-    for (const file of transcriptFiles(root, 2)) {
-      const record = readClaudeTranscript(file, source);
-      if (record) records.push(record);
+function readClaudeStore(roots: string[], source: string, context = readContext()) {
+  return readStore(roots, source, readClaudeTranscript, 2, context);
+}
+
+/* ---------------------------------------------------------- Codex rollouts */
+
+function readCodexTranscript(path: string, source: string): SessionRecord | undefined {
+  const stat = fileStat(path);
+  if (!stat) return undefined;
+  const { entries, issues } = readTranscriptHead(path, CODEX_HEAD_BYTES);
+  const meta = entries.find((entry) => entry.type === "session_meta")?.payload;
+  if (typeof meta?.cwd !== "string" || !meta.cwd.trim()) return undefined;
+  // Subagents and internal threads receive machine-generated tasks; these are
+  // not independent evidence of the human user's habits.
+  if (
+    meta.source === "subagent" || meta.source === "internal" ||
+    (meta.source && typeof meta.source === "object" &&
+      ("subagent" in meta.source || "internal" in meta.source)) ||
+    (typeof meta.thread_source === "string" && meta.thread_source !== "user")
+  ) return undefined;
+
+  const prompts: string[] = [];
+  let userEvents = false;
+  let responseUser = false;
+  for (const entry of entries) {
+    const payload = entry.payload;
+    if (entry.type === "response_item" && payload?.role === "user") responseUser = true;
+    if (entry.type !== "event_msg" || payload?.type !== "user_message") continue;
+    userEvents = true;
+    if (typeof payload.message !== "string") {
+      issues.add("malformed_json");
+      continue;
     }
+    // response_item mirrors can contain injected AGENTS.md/environment text.
+    // Only the explicit user event is evidence; repeated real requests stay.
+    push(prompts, payload.message, issues);
   }
-  return records;
+  if (responseUser && !userEvents) issues.add("no_user_events");
+  return {
+    source,
+    path,
+    cwd: meta.cwd,
+    bytes: stat.bytes,
+    created: timestamp(meta.timestamp, stat.created),
+    modified: stat.modified,
+    prompts,
+    promptsComplete: issues.size === 0,
+    samplingIssues: [...issues],
+  };
 }
 
 /* --------------------------------------------------------------------- sources */
@@ -298,7 +408,7 @@ interface SourceDefinition {
   id: string;
   label: string;
   roots: () => string[];
-  read: (roots: string[]) => SessionRecord[];
+  read: (roots: string[], context?: ReadContext) => SessionRecord[];
 }
 
 /**
@@ -311,19 +421,28 @@ export const SESSION_SOURCES: readonly SourceDefinition[] = Object.freeze([
     id: "rsih",
     label: "RSIH",
     roots: () => [join(getAgentDir(), "sessions")],
-    read: (roots) => readPiStore(roots, "rsih"),
+    read: (roots, context) => readPiStore(roots, "rsih", context),
   },
   {
     id: "pi",
     label: "Pi",
     roots: () => [join(homedir(), ".pi", "agent", "sessions")],
-    read: (roots) => readPiStore(roots, "pi"),
+    read: (roots, context) => readPiStore(roots, "pi", context),
   },
   {
     id: "claude",
     label: "Claude Code",
     roots: () => [join(homedir(), ".claude", "projects")],
-    read: (roots) => readClaudeStore(roots, "claude"),
+    read: (roots, context) => readClaudeStore(roots, "claude", context),
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    roots: () => {
+      const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+      return [join(home, "sessions"), join(home, "archived_sessions")];
+    },
+    read: (roots, context) => readStore(roots, "codex", readCodexTranscript, 3, context),
   },
 ]);
 
@@ -337,18 +456,23 @@ export function sourceIds() {
  * Read the requested sources. Unknown ids are reported rather than ignored, so a
  * typo does not look like an empty history.
  */
-export function readSessions(requested: readonly string[] = DEFAULT_SOURCE_IDS): ScanResult {
+export function readSessions(
+  requested: readonly string[] = DEFAULT_SOURCE_IDS,
+  extraRoots: readonly string[] = [],
+): ScanResult {
   const wanted = new Set(requested.map((id) => String(id).toLowerCase().trim()));
   const known = new Set(sourceIds());
   const unknownSources = [...wanted].filter((id) => !known.has(id));
 
   const sources: SourceScan[] = [];
   const records: SessionRecord[] = [];
+  const context = readContext();
   for (const source of SESSION_SOURCES) {
     if (!wanted.has(source.id)) continue;
     const roots = source.roots();
-    const available = roots.some((root) => existsSync(root));
-    const found = available ? source.read(roots) : [];
+    const available = roots.some(isDirectory);
+    const previousSkipped = context.skippedFiles;
+    const found = available ? source.read(roots, context) : [];
     records.push(...found);
     sources.push({
       id: source.id,
@@ -356,10 +480,14 @@ export function readSessions(requested: readonly string[] = DEFAULT_SOURCE_IDS):
       roots,
       available,
       sessions: found.length,
+      skippedFiles: context.skippedFiles - previousSkipped,
     });
   }
 
-  return { sources, records, unknownSources };
+  // Known stores claim a file before custom roots, so aliases do not relabel it
+  // as custom or inflate either the workspace's session count or its evidence.
+  records.push(...readPiStore([...extraRoots], "custom", context));
+  return { sources, records, unknownSources, skippedFiles: context.skippedFiles };
 }
 
 /** Extra sessions roots the user names by hand, read as Pi-format transcripts. */

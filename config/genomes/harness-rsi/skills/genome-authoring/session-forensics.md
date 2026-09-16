@@ -18,14 +18,27 @@ real `cwd` instead.
 | `rsih` | `<agent dir>/sessions/--<encoded cwd>--/*.jsonl` | Pi |
 | `pi` | `~/.pi/agent/sessions/--<encoded cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<encoded cwd>/*.jsonl` | Claude Code |
+| `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` and `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
 
 RSIH is new, so most people have little or nothing in the first row and all of
 their real history in one of the others. **Check `sources` on the workspace
 before choosing a recipe** — a workspace can carry history from more than one
-harness, and the two schemas need different greps.
+harness, and the schemas need different readers.
 
-Codex (`~/.codex/sessions`) is not wired up. If the user works mainly there, say
-so plainly rather than presenting a thin result as the whole picture.
+Codex is opt-in, with `CODEX_HOME` defaulting to `~/.codex`. Custom `roots` are
+still Pi-format directories; select a custom Codex home before launching GEE.
+Check `sampling_issues` and `session_files_skipped` before interpreting the
+results. A missing keyword in a bounded sample does not mean an absent habit.
+Pi/Claude reads stop at 64 KiB per file; Codex stops at 2 MiB. All sources retain
+at most 40 text prompts per file and 600 characters per prompt. Bad lines and
+truncation make `prompts_complete` false. First-message excerpts can still contain
+private information: these are user prompts, not a redaction mechanism.
+
+Only plain Codex JSONL rollouts are supported. Compressed `.jsonl.zst`, missing
+metadata, unreadable files, and explicitly marked subagent/internal threads are
+reported as skipped. The scanner does not read databases or `history.jsonl`.
+Path aliases are deduplicated; distinct forks and copied rollouts are not. Do not
+treat their shared history as independent evidence of repeated preferences.
 
 ## Line shapes you will grep for
 
@@ -57,6 +70,56 @@ as `user` entries with string content, so filter on `promptSource":"typed"` (or
 reject content starting with `<`); and tool names are capitalised (`Bash`,
 `Read`, `Write`, `Edit`, `Task`), so a histogram from the two schemas cannot be
 added together without normalising.
+
+Codex has an envelope around its records:
+
+```jsonc
+{"type":"session_meta","payload":{"cwd":"/workspace/project","source":"cli", ...}}
+{"type":"event_msg","payload":{"type":"user_message","message":"what the user typed", ...}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"npm test\"}", ...}}
+```
+
+Use only `event_msg` / `user_message` for user evidence. A `response_item` with
+`role: "user"` may contain injected AGENTS.md/environment context or a duplicate
+of the same request. Do not fall back to it, even when no user events were found.
+Tool arguments are a JSON **string** and need a second parse before extracting
+`cmd`, `command`, or paths. Unlike Claude's legacy heuristic, genuine Codex user
+text beginning with `<` is not discarded.
+
+For a **selected** Codex rollout, aggregate with Node's built-in JSON and line
+readers instead of using the Pi/Claude greps below. This streams the file and
+returns counts, without putting the transcript into context:
+
+```bash
+SESSION_FILE='<one selected rollout path>'
+node --input-type=module - "$SESSION_FILE" <<'JS'
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+const tools = new Map();
+let userTurns = 0, malformed = 0;
+for await (const line of createInterface({
+  input: createReadStream(process.argv[2]), crlfDelay: Infinity,
+})) {
+  if (!line.trim()) continue;
+  let entry;
+  try { entry = JSON.parse(line); } catch { malformed++; continue; }
+  const p = entry?.payload;
+  if (entry?.type === 'event_msg' && p?.type === 'user_message') userTurns++;
+  if (entry?.type === 'response_item' &&
+      ['function_call', 'custom_tool_call'].includes(p?.type) &&
+      typeof p.name === 'string') {
+    tools.set(p.name, (tools.get(p.name) ?? 0) + 1);
+  }
+}
+console.log(JSON.stringify({ userTurns, malformed,
+  tools: [...tools].sort((a, b) => b[1] - a[1]),
+}, null, 2));
+JS
+```
+
+This selective analysis can read beyond the scanner's head budget. For an
+unusually large individual record, inspect bounded byte ranges instead. Use the
+counts to choose which specific user events and tool arguments to read next.
 
 ## Triage before anything else
 

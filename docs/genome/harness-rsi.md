@@ -81,8 +81,9 @@ config/genomes/harness-rsi/
    只回一个词就再追问一次。
 2. **问 session 范围，然后扫。** 这一问是真正的多选，所以用
    `AskUserQuestion` + `allowMultiple: true`——RSIH 自己的库默认包含，只问要不要
-   把 Pi 和 Claude Code 的也算进来，自由文本仍然开着（用户可以直接报一个目录，进
-   `roots`）。然后 **`scan_workspaces`** 按工作目录归并 session 历史，返回**事实**：
+   把 Pi、Claude Code 和 Codex 的也算进来，自由文本仍然开着（用户指定的 Pi 格式目录进
+   `roots`；其他 Codex 位置通过启动前设置 `CODEX_HOME` 选择）。然后 **`scan_workspaces`**
+   按工作目录归并 session 历史，返回**事实**：
    路径、哪几个 source 贡献了、session 数、字节数、时间跨度、用户开头几句原话的
    摘录。它不排序、不写描述——那是 agent 的活。transcript 正文只用于关键词匹配，
    绝不返回给模型。
@@ -126,9 +127,10 @@ RSIH 是新的，所以大多数人第一次跑这个 Genome 时自己的库是�
 | `rsih` | `<agent dir>/sessions/--<编码后的 cwd>--/*.jsonl` | Pi |
 | `pi` | `~/.pi/agent/sessions/--<编码后的 cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<编码后的 cwd>/*.jsonl` | Claude Code |
+| `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` 和 `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
 
-默认只读 `rsih`，其余由用户在第 2 步显式勾选；`roots` 参数还能读用户手工指定的任意
-目录。同一个 cwd 在多个 source 都有历史时会归并成一个工作区，并标出各自的贡献
+默认只读 `rsih`，其余由用户在第 2 步显式勾选；`roots` 参数只读取用户指定的 Pi 格式
+目录。Codex 默认使用 `~/.codex`，可在启动前通过 `CODEX_HOME` 指定其他位置。同一个 cwd 在多个 source 都有历史时会归并成一个工作区，并标出各自的贡献
 （本机实测 `/Users/lx` 三个 source 都有）。
 
 Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一个按 cwd 命名的目录，
@@ -141,18 +143,41 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
   裸字符串且不以 `<` 开头」——本机实测这条规则与 `promptSource` 的结果逐条一致
   （69 条 typed / 24 条包装标签）。
 
-**读取是有界的。** 每个 transcript 只读文件头（64 KB）。Pi 的 cwd 在第一行、开头几轮
-用户输入紧随其后；Claude 第一条真实用户消息的偏移本机实测中位 424 字节、最坏 1.4 KB，
-所以 64 KB 对两种格式都不构成实际限制。`prompts_complete` 会告诉 agent 这个工作区的
-摘录是完整的还是只是开头。实测：Pi 152 个 session 19ms，Claude 53 个 7ms，三个 source
-一共 357 个 session 38ms。
+**Codex 使用独立的用户事件。** 从 `session_meta.payload.cwd` 获取工作区，只把
+`event_msg` 中 `payload.type === "user_message"` 的 `message` 当作用户输入。
+`response_item` 中的 user 消息可能是 AGENTS.md、环境信息或真实请求的重复表示，
+不作为回退来源；没有用户事件但存在 user 消息时，返回 `no_user_events`。
+明确标注为 subagent 或内部线程的会话会跳过，避免把 agent 生成的任务当成人的偏好。
 
-加一个 harness 就是往 `SESSION_SOURCES` 加一条记录加一个 reader，扫描路径本身不
-认识任何格式。**Codex 还没接**，而且它不是同一个量级的活：本机 `~/.codex/sessions`
-是 1341 个文件 / 2.9 GB，单文件能到 298 MB，第一条真实用户消息的偏移中位 49 KB、
-36% 的 session 超过 64 KB、最坏 1.1 MB。要么把窗口开到 MB 级，要么拿
-`~/.codex/history.jsonl`（2.9 MB，只有 `session_id` 和文本、没有 cwd）去和 1341 个
-rollout 的头部做 join。
+**读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex 最多读前 2 MiB，
+因为开头的注入上下文可能很长。各来源每个会话最多保留 40 条文本请求，每条保留
+600 个字符。达到字节或消息上限、文本截断、记录损坏时，`prompts_complete` 为
+`false`，`sampling_issues` 列出具体原因：
+
+| 标记 | 含义 |
+| --- | --- |
+| `byte_limit` | 文件超出已读取的头部窗口（也可能正在追加） |
+| `prompt_limit` | 存在超过 40 条的非空用户文本请求 |
+| `prompt_truncated` | 至少一条已保留请求超过 600 字符 |
+| `malformed_json` | 跳过了损坏或不符合记录形状的内容 |
+| `read_error` | 文件读取失败 |
+| `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
+
+损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`
+只描述已返回会话的文本采样，不代表检索了全部历史。关键词未命中也不能证明历史上
+没有相关工作。
+
+相同文件的重复路径及符号链接别名只计算一次，内置来源先于 `roots` 认领文件；
+不同副本和 fork 仍然按不同文件计数，不根据文本内容去重，也不展开继承的 fork
+历史。分析习惯时，应留意 fork 之间重复的历史不能算作独立证据。
+
+无法读取、缺少元数据、明确排除的非用户线程，以及尚不支持的压缩 `.jsonl.zst`
+文件，计入 `session_files_skipped`；每个来源也报告 `files_skipped`。当前只支持
+普通 JSONL rollout，不读 `history.jsonl`，不扫描数据库；日志记录形状与测试来源见
+[`Codex fixtures`](../../test/fixtures/codex/README.md)。
+
+加一个 harness 仍然是往 `SESSION_SOURCES` 加一条记录和一个 reader，工作区聚合
+不需要认识各来源的格式。
 
 `AskUserQuestion` 是从 Pi 上游整份移植过来的：它在 fork 里是核心内建工具，但
 released 0.84.3 没有，所以 Genome 自带一份而不是依赖某个 fork。唯一的改动是

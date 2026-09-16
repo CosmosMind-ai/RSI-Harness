@@ -23,11 +23,11 @@ import { join } from "node:path";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_SOURCE_IDS,
-  readExtraRoots,
   readSessions,
   SESSION_SOURCES,
   sourceIds,
   type SessionRecord,
+  type SamplingIssue,
 } from "./session-sources.ts";
 import {
   AskUserQuestionDialog,
@@ -103,6 +103,7 @@ function newWorkspace(cwd: string, record: SessionRecord) {
     excerpts: [] as string[],
     promptsSampled: 0,
     promptsComplete: true,
+    samplingIssues: new Set<SamplingIssue>(),
     // Kept only for scoring; never returned to the model.
     promptText: "",
   };
@@ -121,12 +122,15 @@ function absorb(workspace, record: SessionRecord) {
 
   workspace.files.push(record.path);
   if (!record.promptsComplete) workspace.promptsComplete = false;
+  for (const issue of record.samplingIssues) workspace.samplingIssues.add(issue);
   workspace.promptsSampled += record.prompts.length;
   if (workspace.excerpts.length < 3 && record.prompts[0]) {
     workspace.excerpts.push(`[${record.source}] ${excerpt(record.prompts[0])}`);
   }
   if (workspace.promptText.length < MAX_PROMPT_TEXT_CHARS) {
-    workspace.promptText += ` ${record.prompts.join(" ").toLowerCase()}`;
+    workspace.promptText += ` ${record.prompts.join(" ").toLowerCase()}`.slice(
+      0, MAX_PROMPT_TEXT_CHARS - workspace.promptText.length,
+    );
   }
 }
 
@@ -137,9 +141,9 @@ async function scanWorkspaces({
   paths = [],
   limit = DEFAULT_LIMIT,
 }) {
-  const scan = readSessions(sources);
   const extraRoots = roots.map(expandHome);
-  const records = [...scan.records, ...readExtraRoots(extraRoots)];
+  const scan = readSessions(sources, extraRoots);
+  const records = scan.records;
   // Recent first, so the excerpts describe what the workspace was last used for.
   records.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 
@@ -180,10 +184,12 @@ async function scanWorkspaces({
       roots: source.roots,
       available: source.available,
       sessions: source.sessions,
+      files_skipped: source.skippedFiles,
     })),
     unknown_sources: scan.unknownSources,
     extra_roots_scanned: extraRoots,
     sessions_found: records.length,
+    session_files_skipped: scan.skippedFiles,
     workspaces_found: scored.length,
     workspaces_returned: kept.length,
     workspaces_omitted: Math.max(0, scored.length - kept.length),
@@ -202,6 +208,7 @@ async function scanWorkspaces({
       })),
       prompts_sampled: workspace.promptsSampled,
       prompts_complete: workspace.promptsComplete,
+      sampling_issues: [...workspace.samplingIssues].sort(),
       first_messages: workspace.excerpts,
       // Full transcript paths are only worth the tokens once a workspace matters.
       session_files: focused ? workspace.files.slice(0, MAX_LISTED_FILES) : undefined,
@@ -510,6 +517,9 @@ export default function harnessRsi(pi: ExtensionAPI) {
         .filter((source) => !source.available)
         .map((source) => source.id);
       const hints: string[] = [];
+      if (result.session_files_skipped > 0) {
+        hints.push(`${result.session_files_skipped} session files skipped (unreadable, unsupported, missing metadata, or non-user Codex threads). Results do not cover the entire store.`);
+      }
       if (result.unknown_sources.length > 0) {
         hints.push(
           `Unknown source ids ignored: ${result.unknown_sources.join(", ")}. Valid ids are ${sourceIds().join(", ")}.`,
