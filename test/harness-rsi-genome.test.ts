@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -561,6 +562,54 @@ test("installing from a path lands under the bundle's own name", async () => {
     "the reference path must not become a directory name",
   );
 });
+
+for (const layout of ["bundle", "file"]) {
+  test(`installing an already-installed ${layout} is a no-op`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "rsih-self-install-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const source = writeShippedSeed(root, "fixture", "original");
+    const manifest = layout === "bundle"
+      ? join(source, GENOME_MANIFEST_NAME)
+      : join(root, "fixture.json");
+    if (layout === "file") {
+      writeFileSync(manifest, JSON.stringify({
+        genome_schema_version: "2",
+        genome_id: "harness:fixture",
+      }));
+    }
+    const installed = installGenomeBundle(manifest, "fixture", home);
+    if (layout === "bundle") {
+      writeFileSync(join(home, ".rsih", "genomes", "fixture.json"), "preserve sibling");
+    }
+    const marker = layout === "bundle"
+      ? readFileSync(join(dirname(installed.path), SEED_MARKER_NAME), "utf8")
+      : undefined;
+    const before = genomeContentHash(home);
+
+    assert.deepEqual(installGenomeBundle(installed.path, "fixture", home), installed);
+    const result = spawnSync(process.execPath, [
+      "--experimental-strip-types", join(repository, "src", "cli.ts"),
+      "genome", "install", installed.path,
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        RSIH_CODING_AGENT_DIR: join(home, ".rsih"),
+        PI_CODING_AGENT_DIR: join(home, ".rsih"),
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /fixture is already installed at/);
+    assert.equal(genomeContentHash(home), before);
+    if (layout === "bundle") {
+      assert.equal(readFileSync(join(dirname(installed.path), SEED_MARKER_NAME), "utf8"), marker);
+    }
+  });
+}
 
 /* -------------------------------------------------------------- gee alias */
 test("gee is rsih --genome harness-rsi", () => {
