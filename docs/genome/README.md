@@ -127,8 +127,10 @@ manifest 固定叫 `genome.json`：
   然后被静默覆盖。要求 id 相同，就把这条数据丢失路径关掉了。
 
 `<name>.json` 在查找顺序上先于 `<name>/genome.json`，所以 `install` 一个 bundle 时
-如果旁边有同名单文件，会先把它改名成 `<name>.json.replaced` 再拷——否则安装是彻底
-的无操作。另外，用户层的 Genome 加载失败时，错误里会点明它遮蔽了随发行版附带的
+如果旁边有同名单文件，会先把它改名成 `<name>.json.replaced` 再拷；若该备份名已被
+占用，则依次尝试 `.replaced.1`、`.replaced.2` 等未占用名称，保留已有备份，并在终端
+报告实际路径，避免单文件继续遮蔽新安装的 bundle。另外，用户层的 Genome 加载失败
+时，错误里会点明它遮蔽了随发行版附带的
 同名 Genome，并给出 `install` 命令。
 
 **已知限制**：`extensions` 和 `skills[].source` 这类相对路径是在最外层 manifest

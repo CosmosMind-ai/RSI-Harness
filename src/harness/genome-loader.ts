@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -177,6 +178,10 @@ export function installGenomeBundle(manifestPath, name, homeDirectory = homedir(
   const shadowing = join(directory, `${name}.json`);
   if (isBundle && existsSync(shadowing)) {
     replaced = `${shadowing}.replaced`;
+    let suffix = 1;
+    while (lstatSync(replaced, { throwIfNoEntry: false })) {
+      replaced = `${shadowing}.replaced.${suffix++}`;
+    }
     renameSync(shadowing, replaced);
   }
 
