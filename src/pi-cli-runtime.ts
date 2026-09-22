@@ -38,9 +38,16 @@ import {
   renderHarnessSystemPrompt,
 } from "./harness/genome.ts";
 import {
+  availableGenomeNames,
   resolveHarnessGenome,
   genomeDisplayName,
 } from "./harness/genome-loader.ts";
+import {
+  createGenomeSession,
+  startupPromptRecord,
+  switchedSystemPrompt,
+  unswitchableDifferences,
+} from "./harness/genome-session.ts";
 import { validateJsonSchema } from "./core/schema.ts";
 import { createMcpTools } from "./harness/mcp.ts";
 import {
@@ -525,6 +532,32 @@ function supplementalSystemPrompt(genome) {
   });
 }
 
+/**
+ * The two prompt strings a Genome contributes, assembled once so startup (which
+ * puts them on argv) and `/switch-genome` (which has to replace exactly these
+ * strings in a live prompt) can never disagree about what the Genome said.
+ */
+function genomeInstructions(genome) {
+  const appendPrompt = [genome.append_system_prompt, supplementalSystemPrompt(genome)]
+    .filter(Boolean)
+    .join("\n\n");
+  return {
+    systemPrompt: genome.system_prompt || undefined,
+    appendPrompt: appendPrompt || undefined,
+  };
+}
+
+/**
+ * The model a Genome asks for, as a Pi model object. A Genome names either an
+ * RSIH provider profile plus a model id, or just an id; the second form has to
+ * be searched for because the provider is whatever registered that id.
+ */
+function findGenomeModel(modelRegistry, model) {
+  if (!model?.id) return undefined;
+  if (model.profile) return modelRegistry.find(model.profile, model.id);
+  return modelRegistry.getAll().find((candidate) => candidate.id === model.id);
+}
+
 function registerInlineResources(pi: ExtensionAPI, genome) {
   const inlineSkills = (genome.skills ?? []).filter(
     (skill) => typeof skill === "object" && skill.source === undefined,
@@ -672,13 +705,22 @@ function toolName(name) {
  * Genome `tools` entries are a patch on whatever Pi already activated, not a
  * whitelist. A Genome that never mentions tools keeps Pi's full tool set, and a
  * Genome that disables one tool keeps the rest.
+ *
+ * `previous` is the Genome being switched away from. Reload carries the current
+ * active tool set forward, so without releasing that Genome's disables first, a
+ * tool switched off by a Genome that is no longer running would stay off --
+ * the same residue `mergeManagedSettings` releases for settings.
  */
-export function genomeActiveToolNames(activeToolNames, allToolNames, genome) {
+export function genomeActiveToolNames(activeToolNames, allToolNames, genome, previous) {
   const entries = genome.tools ?? [];
-  if (entries.length === 0) return undefined;
+  const released = releasedToolNames(previous, entries);
+  if (entries.length === 0 && released.length === 0) return undefined;
 
   const known = new Set(allToolNames);
   const active = new Set(activeToolNames);
+  for (const name of released) {
+    if (known.has(name)) active.add(name);
+  }
   for (const tool of entries) {
     const name = toolName(tool.name);
     if (tool.enabled === false) {
@@ -688,6 +730,16 @@ export function genomeActiveToolNames(activeToolNames, allToolNames, genome) {
     }
   }
   return allToolNames.filter((name) => active.has(name));
+}
+
+/** Tools the outgoing Genome disabled that the incoming one does not mention. */
+function releasedToolNames(previous, entries) {
+  if (!previous) return [];
+  const mentioned = new Set(entries.map((tool) => toolName(tool.name)));
+  return (previous.tools ?? [])
+    .filter((tool) => tool.enabled === false)
+    .map((tool) => toolName(tool.name))
+    .filter((name) => !mentioned.has(name));
 }
 
 /**
@@ -772,26 +824,197 @@ function runtimeResourceLabels(pi, genome) {
   };
 }
 
+/**
+ * Everything the runtime derives from one resolved Genome, in one record.
+ *
+ * Startup and `/switch-genome` both go through here, so a switched session is
+ * described by exactly the same derivation as a freshly started one -- there is
+ * no second, drifting copy of "what this Genome means".
+ */
+export function genomeActivation(resolved, { profiles = {}, preserveSessionDefaults = false } = {}) {  const genome = resolved.genome;
+  const label = genomeDisplayName(resolved);
+  const profile = genome.model?.profile;
+  return {
+    resolved,
+    genome,
+    reference: resolved.reference,
+    label,
+    baseDirectory: resolve(resolved.baseDirectory ?? process.cwd()),
+    instructions: genomeInstructions(genome),
+    modelLabel: genome.model?.id ?? (profile ? profiles[profile]?.model : undefined) ?? "",
+    seedNotice: genomeSeedNotice(resolved, label),
+    showGenomeStatus: resolved.reference !== "default",
+    preserveSessionDefaults,
+  };
+}
+
+/**
+ * Build the inline extension that carries a Genome into a running Pi session.
+ *
+ * `session` rather than a Genome, because `ctx.reload()` re-invokes this factory
+ * and the new invocation has to pick up whatever `/switch-genome` left in the
+ * holder. Everything else here is genuinely per-process: CLI overrides, provider
+ * profiles, and the cwd.
+ */
+/**
+ * Tell the user, and the model, that the harness changed underneath them.
+ *
+ * The model needs this as context rather than as a notification: it is still
+ * holding a conversation that started under different instructions, and the
+ * turn it is about to take should be taken under the new ones.
+ */
+function reportGenomeSwitch(pi, ctx, announcement) {
+  const { from, to, caveats } = announcement;
+  if (ctx.mode === "tui") {
+    ctx.ui.notify(`Genome: ${from} -> ${to}`, "info");
+    for (const caveat of caveats) ctx.ui.notify(caveat, "warning");
+  }
+  const lines = [
+    `The harness switched from the "${from}" Genome to "${to}" mid-session.`,
+    "The conversation so far happened under the previous Genome; from this turn on you are running under the new one, and its instructions take precedence.",
+  ];
+  if (caveats.length > 0) {
+    lines.push(
+      `The switch was not complete. Do not assume the following were applied: ${caveats.join("; ")}.`,
+    );
+  }
+  pi.sendMessage(
+    {
+      customType: "rsih.genome-switch",
+      content: lines.join("\n\n"),
+      display: true,
+      details: { from, to, caveats },
+    },
+    { deliverAs: "nextTurn" },
+  );
+}
+
+/**
+ * `/switch-genome <name>` -- replace the running harness without losing the
+ * conversation.
+ *
+ * Registered at factory time on purpose: Pi rebuilds the slash-command
+ * autocomplete list only at startup and reload, so a lazily registered command
+ * would dispatch but never complete.
+ */
+function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
+  pi.registerCommand("switch-genome", {
+    description: "Switch the active Genome, keeping the current conversation",
+    getArgumentCompletions(prefix) {
+      const active = session.current().reference;
+      return availableGenomeNames({ cwd })
+        .filter((name) => name !== active && name.startsWith(prefix))
+        .map((name) => ({ value: name, label: name }));
+    },
+    async handler(args, ctx) {
+      const reference = args.trim();
+      if (!reference) {
+        const names = availableGenomeNames({ cwd });
+        ctx.ui.notify(
+          `Usage: /switch-genome <name>. Available: ${names.join(", ") || "(none)"}`,
+          "info",
+        );
+        return;
+      }
+      if (typeof ctx.reload !== "function") {
+        ctx.ui.notify(
+          "Switching Genomes needs a reloadable session; this run mode does not support it.",
+          "error",
+        );
+        return;
+      }
+
+      // Nothing below this point may touch shared state until the Genome has
+      // resolved: a typo must leave the session exactly as it was.
+      let next;
+      try {
+        next = genomeActivation(
+          resolveHarnessGenome(reference, { cwd, homeDirectory: homedir() }),
+          { profiles },
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+        return;
+      }
+
+      const previous = session.current();
+      if (next.genome.genome_id === previous.genome.genome_id) {
+        ctx.ui.notify(`Already running ${previous.label}.`, "info");
+        return;
+      }
+
+      // reload() refuses outright while the agent is streaming or compacting.
+      await ctx.waitForIdle();
+
+      const caveats = unswitchableDifferences(previous.genome, next.genome);
+      const probe = switchedSystemPrompt({
+        base: ctx.getSystemPrompt(),
+        options: ctx.getSystemPromptOptions(),
+        startup: session.startup(),
+        target: next.instructions,
+      });
+      caveats.push(...(probe?.caveats ?? []));
+
+      // Reproject before reloading: reload is what makes Pi re-read these, and
+      // mergeManagedSettings drops keys the previous Genome managed.
+      const projection = projectGenomeSettings(next.genome);
+      applyManagedConfiguration({
+        agentDirectory: getPiAgentDir(),
+        settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
+        keybindings: projection.keybindings,
+        stamp: {
+          genome: next.reference,
+          genomeId: next.genome.genome_id,
+          rsih: RSIH_VERSION,
+        },
+      });
+
+      const model = findGenomeModel(ctx.modelRegistry, next.genome.model);
+      if (next.genome.model?.id && !model) {
+        caveats.push(
+          `the model ${next.genome.model.id} this Genome asks for was not found, so the current model is still in use`,
+        );
+      } else if (model && !(await pi.setModel(model))) {
+        caveats.push(
+          `no API key is configured for ${model.id}, so the current model is still in use`,
+        );
+      }
+      if (next.genome.runtime?.thinking_level) {
+        pi.setThinkingLevel(next.genome.runtime.thinking_level);
+      }
+
+      session.switchTo(next, {
+        from: previous.label,
+        to: next.label,
+        caveats,
+      });
+
+      // Terminal for this handler: reload tears down the session this `ctx`
+      // belongs to, so the report happens in the new `session_start`.
+      await ctx.reload();
+      return;
+    },
+  });
+}
+
 async function createGenomeExtension({
-  genome,
-  genomeLabel,
-  modelLabel,
-  resources,
-  showGenomeStatus,
-  reference,
-  seedNotice,
-  baseDirectory,
+  session,
   profiles,
-  maxTurns,
+  maxTurns: cliMaxTurns,
   cliOverridesTools,
   cliOverridesThinking,
-  preserveSessionDefaults,
   cwd,
 }): Promise<ExtensionFactory> {
   return async (pi) => {
+    const active = session.current();
+    const genome = active.genome;
+    const maxTurns = cliMaxTurns ?? genome.runtime?.max_turns;
     const activeResources = {
-      skills: [...(resources?.skills ?? [])],
-      extensions: [...(resources?.extensions ?? [])],
+      skills: genomeResourceLabels(genome.skills),
+      extensions: genomeResourceLabels(genome.extensions),
     };
     const narrowedSchemas = genomeNarrowedSchemas(genome);
 
@@ -801,7 +1024,7 @@ async function createGenomeExtension({
       type: "string",
       description:
         "Genome name or JSON path (./.rsih/genomes, then ~/.rsih/genomes). Shorthand: rsih +name, :name or ::name.",
-      default: reference,
+      default: active.reference,
     });
     for (const [name, description] of RSIH_FLAG_DESCRIPTIONS) {
       pi.registerFlag(name, { type: "string", description });
@@ -817,6 +1040,7 @@ async function createGenomeExtension({
     registerProfiles(pi, profiles, genome);
     registerInlineResources(pi, genome);
     registerScratchpad(pi, genome);
+    registerGenomeSwitch(pi, { session, profiles, cwd });
 
     for (const tool of createGeneratedTools({ cwd, genome })) {
       pi.registerTool({
@@ -854,12 +1078,25 @@ async function createGenomeExtension({
     }
 
     pi.on("resources_discover", () =>
-      projectGenomeResources(genome, (path) => resolve(baseDirectory, path)),
+      projectGenomeResources(genome, (path) => resolve(active.baseDirectory, path)),
     );
 
     pi.on("before_provider_request", (event) =>
       applyModelOptionsToPayload(event.payload, genome.model_options),
     );
+
+    // The only door Pi leaves open for prompt text once a session is running.
+    // Pi clears the override in the `finally` of every agent run, so this has to
+    // answer on every turn, not just the first one after a switch.
+    pi.on("before_agent_start", (event) => {
+      const switched = switchedSystemPrompt({
+        base: event.systemPrompt,
+        options: event.systemPromptOptions,
+        startup: session.startup(),
+        target: active.instructions,
+      });
+      return switched ? { systemPrompt: switched.prompt } : undefined;
+    });
 
     pi.on("session_start", (_event, ctx) => {
       if (ctx.mode === "tui") {
@@ -869,8 +1106,8 @@ async function createGenomeExtension({
         ctx.ui.setHeader((tui, theme) =>
           createRsiHeader(theme, {
             cwd,
-            model: ctx.model?.id ?? modelLabel,
-            genome: genomeLabel,
+            model: ctx.model?.id ?? active.modelLabel,
+            genome: active.label,
             version: RSIH_VERSION,
             resources: activeResources,
           }),
@@ -880,13 +1117,19 @@ async function createGenomeExtension({
         );
       }
 
-      if (showGenomeStatus && ctx.mode === "tui") {
-        ctx.ui.setStatus("rsih-genome", genomeFooterStatus(genomeLabel));
+      if (active.showGenomeStatus && ctx.mode === "tui") {
+        ctx.ui.setStatus("rsih-genome", genomeFooterStatus(active.label));
       }
 
-      if (seedNotice && ctx.mode === "tui") {
-        ctx.ui.notify(seedNotice.message, seedNotice.level);
+      if (active.seedNotice && ctx.mode === "tui") {
+        ctx.ui.notify(active.seedNotice.message, active.seedNotice.level);
       }
+
+      // Reported here rather than in the command handler because `ctx.reload()`
+      // tears the handler's session down: this is the first point at which the
+      // switched-to Genome is actually the one running.
+      const announcement = session.takeAnnouncement();
+      if (announcement) reportGenomeSwitch(pi, ctx, announcement);
 
       const prior = ctx.sessionManager
         .getEntries()
@@ -897,11 +1140,11 @@ async function createGenomeExtension({
         .at(-1);
       if (
         prior?.data?.genome_id !== genome.genome_id ||
-        prior?.data?.reference !== reference
+        prior?.data?.reference !== active.reference
       ) {
         pi.appendEntry("rsih.genome", {
-          reference,
-          baseDirectory,
+          reference: active.reference,
+          baseDirectory: active.baseDirectory,
           genome_id: genome.genome_id,
           genome,
         });
@@ -912,12 +1155,13 @@ async function createGenomeExtension({
           pi.getActiveTools(),
           pi.getAllTools().map((tool) => tool.name),
           genome,
+          active.previousGenome,
         );
         if (activeTools) pi.setActiveTools(activeTools);
       }
       if (
         !cliOverridesThinking &&
-        !preserveSessionDefaults &&
+        !active.preserveSessionDefaults &&
         genome.runtime?.thinking_level
       ) {
         pi.setThinkingLevel(genome.runtime.thinking_level);
@@ -1045,8 +1289,6 @@ export async function runPiCli(argv) {
       homeDirectory: homedir(),
     });
   const { genome } = resolvedGenome;
-  const genomeLabel = genomeDisplayName(resolvedGenome);
-  const baseDirectory = resolve(resolvedGenome.baseDirectory ?? cwd);
 
   // Pi exposes no API for settings or keybindings, so the Genome's projection
   // is compiled into the files Pi reads. Only Genome-declared keys are touched.
@@ -1087,25 +1329,26 @@ export async function runPiCli(argv) {
   ) {
     genomeArgs.push("--model", selectedModel);
   }
+  // A Genome's instructions are argv-only, so what actually reached Pi has to
+  // be recorded verbatim: `/switch-genome` replaces exactly these strings later.
+  const instructions = genomeInstructions(genome);
+  const startupPrompts = startupPromptRecord({
+    systemPrompt:
+      hasOption(parsed.piArgs, "--system-prompt") ? undefined : instructions.systemPrompt,
+    appendPrompt:
+      hasOption(parsed.piArgs, "--append-system-prompt") ? undefined : instructions.appendPrompt,
+  });
   // Only replace Pi's own system prompt when the Genome actually declares one.
-  if (
-    genome.system_prompt &&
-    !hasOption(parsed.piArgs, "--system-prompt")
-  ) {
-    genomeArgs.push("--system-prompt", genome.system_prompt);
+  if (startupPrompts.systemPrompt) {
+    genomeArgs.push("--system-prompt", startupPrompts.systemPrompt);
   }
-  const appendedPrompt = [
-    genome.append_system_prompt,
-    supplementalSystemPrompt(genome),
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  if (appendedPrompt && !hasOption(parsed.piArgs, "--append-system-prompt")) {
-    genomeArgs.push("--append-system-prompt", appendedPrompt);
+  if (startupPrompts.appendPrompt) {
+    genomeArgs.push("--append-system-prompt", startupPrompts.appendPrompt);
   }
   // Skills, prompt templates, and themes reach Pi through the
   // `resources_discover` hook. Extensions have no such hook, so they stay on
   // argv; explicit `-e` paths keep working even under resource isolation.
+  const baseDirectory = resolve(resolvedGenome.baseDirectory ?? cwd);
   for (const path of resolveGenomeSources(genome.extensions, baseDirectory)) {
     genomeArgs.push("--extension", path);
   }
@@ -1134,24 +1377,26 @@ export async function runPiCli(argv) {
     );
   }
 
+  // The holder, not the Genome, is what the extension closes over: `ctx.reload()`
+  // re-invokes the factory and the new invocation has to see whatever
+  // `/switch-genome` put here.
+  //
+  // A built-in Genome is copied into ~/.rsih/genomes on first use, so that the
+  // Genome the agent runs -- and reads its skills from -- is always the one in
+  // the user's own directory. Every write, and every refusal to write, is
+  // announced rather than done silently; `genomeActivation` carries that notice.
+  const session = createGenomeSession(
+    genomeActivation(resolvedGenome, {
+      profiles: customProfiles,
+      preserveSessionDefaults,
+    }),
+    startupPrompts,
+  );
+
   const extensionFactory = await createGenomeExtension({
-    genome,
-    genomeLabel,
-    modelLabel: selectedModel ?? "",
-    resources: {
-      skills: genomeResourceLabels(genome.skills),
-      extensions: genomeResourceLabels(genome.extensions),
-    },
-    showGenomeStatus: resolvedGenome.reference !== "default",
-    reference: resolvedGenome.reference,
-    // A built-in Genome is copied into ~/.rsih/genomes on first use, so that the
-    // Genome the agent runs -- and reads its skills from -- is always the one in
-    // the user's own directory. Every write, and every refusal to write, is
-    // announced rather than done silently.
-    seedNotice: genomeSeedNotice(resolvedGenome, genomeLabel),
-    baseDirectory,
+    session,
     profiles: customProfiles,
-    maxTurns: parsed.maxTurns ?? genome.runtime?.max_turns,
+    maxTurns: parsed.maxTurns,
     cliOverridesTools: hasOption(
       parsed.piArgs,
       "--tools",
@@ -1164,7 +1409,6 @@ export async function runPiCli(argv) {
       "-nbt",
     ),
     cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
-    preserveSessionDefaults,
     cwd,
   });
   await runPiMain([...genomeArgs, ...parsed.piArgs], {

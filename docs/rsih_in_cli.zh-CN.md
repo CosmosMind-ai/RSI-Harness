@@ -191,6 +191,26 @@ rsih genome install examples/genomes/paperlab
 rsih :paperlab -p "Set up a smoke test for this repo"
 ```
 
+## 会话中途切换 Genome
+
+`/switch-genome <name>` 在不丢对话的前提下换掉正在跑的 harness——用一个擅长写代码
+的 Genome 起会话，然后把同一份上下文交给一个擅长挑刺的 Genome：
+
+```text
+/switch-genome debate
+```
+
+instructions、tools、skills、prompt templates、themes、policies、settings、
+keybindings、模型和思考等级都会跟着新 Genome 走。历史保留，切换本身会作为一条新的
+`rsih.genome` 写进 session JSONL，并且会明确告知模型 harness 已经变了，避免它继续
+按上一个 Genome 的指令干活。由于恢复会话读的就是这条记录，之后 `rsih --continue`
+续上的是你**切换之后**的那个 Genome。
+
+有三样东西只能由 argv 传递，因此只有重启才能改变：`extensions`、
+`resources.isolate`、`appearance.no_themes`。另外，如果一个 Genome 用 base
+`system_prompt` 整体替换 Pi 的默认 preamble，切换时只能叠加而无法替换掉它。
+凡是没能完整切换的，都会同时告知你和模型——绝不会静默地只切一半。
+
 → [组件开发协议](genome/README.md) ·
 [贡献一个 Genome](genome-community-contribute.zh-CN.md)
 

@@ -204,6 +204,29 @@ rsih genome install examples/genomes/paperlab
 rsih :paperlab -p "Set up a smoke test for this repo"
 ```
 
+## Switching Genome mid-session
+
+`/switch-genome <name>` replaces the running harness without losing the
+conversation — start under a Genome tuned for writing code, then hand the same
+context to one tuned for arguing with it:
+
+```text
+/switch-genome debate
+```
+
+Instructions, tools, skills, prompt templates, themes, policies, settings,
+keybindings, model and thinking level all follow the new Genome. The transcript
+is kept, the switch is recorded in the session JSONL as a new `rsih.genome`
+entry, and the model is told the harness changed so it does not keep working to
+the previous Genome's instructions. Because the record is what a resume reads
+back, `rsih --continue` afterwards resumes under the Genome you switched *to*.
+
+Three things only argv can deliver, so only a restart changes them:
+`extensions`, `resources.isolate`, and `appearance.no_themes`. A Genome whose
+base `system_prompt` replaces Pi's default preamble can be layered on top but
+not substituted for it. Whenever a switch is incomplete it says so, both to you
+and to the model — it never silently half-applies.
+
 → [Component protocol](genome/README.md) ·
 [Contributing a Genome](genome-community-contribute.md)
 

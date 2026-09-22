@@ -80,6 +80,46 @@ export function genomeSearchDirectories({
   ];
 }
 
+/**
+ * Genomes in one directory, in the two shapes a bare name can resolve to.
+ * `bundle` distinguishes `<name>/genome.json` from `<name>.json`, which is what
+ * `genome list` needs to render and what `seedStatus` needs to locate a copy.
+ */
+export function genomeNamesIn(directory) {
+  if (!existsSync(directory)) return [];
+  const found = [];
+  let entries;
+  try {
+    entries = readdirSync(directory);
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    const path = join(directory, entry);
+    if (entry.endsWith(".json") && !isDirectory(path)) {
+      found.push({ name: basename(entry, ".json"), bundle: false });
+    } else if (isDirectory(path) && existsSync(join(path, GENOME_MANIFEST_NAME))) {
+      found.push({ name: entry, bundle: true });
+    }
+  }
+  return found.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/**
+ * Every Genome reachable by bare name, deduplicated the way `resolveHarnessGenome`
+ * resolves: the first layer to declare a name is the one that would load, so a
+ * user copy hides a built-in of the same name here too.
+ */
+export function availableGenomeNames(options = {}) {
+  const byName = new Map();
+  for (const directory of genomeSearchDirectories(options)) {
+    for (const { name } of genomeNamesIn(directory)) {
+      if (!byName.has(name)) byName.set(name, directory);
+    }
+  }
+  return [...byName.keys()].sort();
+}
+
 /** Manifest for a bare Genome name inside one directory: file, then bundle. */
 function manifestIn(directory, reference) {
   const candidates = [

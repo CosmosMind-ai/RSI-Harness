@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { getAgentDir as getPiAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   GENOME_MANIFEST_NAME,
@@ -7,6 +7,7 @@ import {
   findBuiltinGenome,
   genomeDisplayName,
   genomeInstallName,
+  genomeNamesIn,
   genomeSearchDirectories,
   installGenomeBundle,
   resolveHarnessGenome,
@@ -24,30 +25,11 @@ const USAGE = `Usage: rsih genome <command>
   install <name|path>     Copy a Genome into ~/.rsih/genomes. A bare name reinstalls the shipped seed.
 `;
 
-function isDirectory(path) {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** Genome names in a directory: single-file Genomes plus bundle directories. */
-function genomeNamesIn(directory) {
-  if (!existsSync(directory)) return [];
-  const names = [];
-  for (const entry of readdirSync(directory)) {
-    const path = join(directory, entry);
-    if (entry.endsWith(".json") && !isDirectory(path)) {
-      names.push(basename(entry, ".json"));
-    } else if (
-      isDirectory(path) &&
-      existsSync(join(path, GENOME_MANIFEST_NAME))
-    ) {
-      names.push(`${entry}/`);
-    }
-  }
-  return names.sort();
+/** Display names for one directory: bundles are shown with a trailing slash. */
+function genomeDisplayNamesIn(directory) {
+  return genomeNamesIn(directory).map(({ name, bundle }) =>
+    bundle ? `${name}/` : name,
+  );
 }
 
 /**
@@ -90,7 +72,7 @@ function listGenomes(cwd, io) {
     }
     if (seen.has(key)) continue;
     seen.add(key);
-    const names = genomeNamesIn(directory);
+    const names = genomeDisplayNamesIn(directory);
     if (names.length === 0) continue;
     found += names.length;
     const isSeedLayer = builtins.has(directory);

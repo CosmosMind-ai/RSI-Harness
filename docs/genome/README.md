@@ -168,3 +168,26 @@ manifest 固定叫 `genome.json`：
 | Extension 运行时 | inline skill/command、scratchpad、generated tools、MCP、`resources_discover`、`before_provider_request`、参数收窄校验 |
 
 显式 CLI 参数一律优先于 Genome。
+
+### 哪些出口在会话中途还能再开一次
+
+`/switch-genome <name>` 之所以可行，是因为上面四个出口里有三个是可重入的：
+
+| 出口 | 中途换 Genome 时 |
+| --- | --- |
+| Extension 运行时 | `ctx.reload()` 会重跑 extension factory 并重建 ExtensionRunner，所以上一个 Genome 注册的 tool / command 整体作废——这正好补上 Pi 没有 `unregisterTool` 这件事 |
+| `settings.json` / `keybindings.json` | reload 会重读；托管键的释放逻辑本来就按「换 Genome 不留残留」设计 |
+| `resources_discover` | reload 时以 `reason: "reload"` 再触发一次，skill 路径先重置再合并，旧 Genome 的 skill 不会累积 |
+| Pi CLI 参数 | **冻结在启动时**。`--system-prompt` / `--append-system-prompt` 通过每轮的 `before_agent_start` 覆盖来补偿；`--extension`、`--no-*` 隔离开关、`--no-themes` 则只有重启能改 |
+
+两条由此而来的实现约束，改这块代码时必须守住：
+
+- **Genome 不能被闭包捕获成常量。** 所有 hook 都从 `genome-session.ts` 的 holder
+  读当前 Genome，否则 reload 后重跑的 factory 会拿到旧的那一份。
+- **`tools` 是补丁，所以切走时要显式释放。** reload 会把当前激活的工具集带过去，
+  上一个 Genome 关掉的工具因此必须在切换时主动放开——否则一个「没声明任何 tools」
+  的 Genome 会继承上一个 Genome 的收窄。这条有回归测试盯着。
+
+`before_agent_start` 的覆盖是**每轮都要重新给的**：Pi 在每次 agent run 结束时会清掉
+它。替换的做法是把启动时我们自己拼进 argv 的那段原文精确换掉，而不是猜 Pi 的排版；
+拼不上时（比如用户自己传了 `--system-prompt`）就只叠加，并如实报告。
