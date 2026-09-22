@@ -2,6 +2,7 @@
   "name": "rsih",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "piConfig": {
     "name": "rsih",
