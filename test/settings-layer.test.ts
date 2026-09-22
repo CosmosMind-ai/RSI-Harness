@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -87,6 +87,36 @@ test("compiling writes both Pi configuration files", () => {
   );
   assert.deepEqual(keybindings["app.session.tree"], ["ctrl+t"]);
 });
+
+for (const contents of [
+  '[\n  {"theme": "dark"}\n]\n',
+  "null\n",
+  '"dark"\n',
+  "42\n",
+  "true\n",
+  '{"theme":\n',
+]) {
+  test(`compiling preserves invalid configuration contents: ${contents.trim()}`, (t) => {
+    const agentDirectory = mkdtempSync(join(tmpdir(), "rsih-invalid-config-"));
+    t.after(() => rmSync(agentDirectory, { recursive: true, force: true }));
+    const paths = ["settings.json", "keybindings.json"].map((name) =>
+      join(agentDirectory, name),
+    );
+    for (const path of paths) writeFileSync(path, contents, "utf8");
+
+    const result = applyManagedConfiguration({
+      agentDirectory,
+      settings: { quietStartup: true },
+      keybindings: { "app.session.tree": ["ctrl+t"] },
+      stamp: STAMP,
+    });
+
+    for (const path of paths) {
+      assert.equal(readFileSync(path, "utf8"), contents);
+    }
+    assert.deepEqual(result, { settings: undefined, keybindings: undefined });
+  });
+}
 
 test("semantic Genome fields project onto Pi settings", () => {
   const projection = projectGenomeSettings(

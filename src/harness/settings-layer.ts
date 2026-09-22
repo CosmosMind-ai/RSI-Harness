@@ -11,7 +11,7 @@ function readJsonFile(path) {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed
-      : {};
+      : undefined;
   } catch {
     // A malformed file is Pi's to report; never clobber what we cannot read.
     return undefined;
