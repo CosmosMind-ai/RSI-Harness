@@ -21,7 +21,7 @@
     "smoke:binary": "node --experimental-strip-types scripts/smoke-binary.ts",
     "gee": "node --experimental-strip-types src/gee/cli.ts",
     "smoke:model": "node --experimental-strip-types examples/model-smoke.ts",
-    "test": "node --experimental-strip-types --test test/core-harness.test.ts test/cli.test.ts test/model-runtime.test.ts test/settings-layer.test.ts test/pi-surface.test.ts test/harness-rsi-genome.test.ts test/genome-switch.test.ts",
+    "test": "node --experimental-strip-types --test test/core-harness.test.ts test/cli.test.ts test/model-runtime.test.ts test/settings-layer.test.ts test/pi-surface.test.ts test/harness-rsi-genome.test.ts test/genome-switch.test.ts test/supervisor.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test && npm run build"
   },

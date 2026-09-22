@@ -200,16 +200,19 @@ rsih :paperlab -p "Set up a smoke test for this repo"
 /switch-genome debate
 ```
 
+在终端 UI 里这是一次**完整**的切换：屏幕重画一次，新 Genome 声明的一切全部生效——
 instructions、tools、skills、prompt templates、themes、policies、settings、
-keybindings、模型和思考等级都会跟着新 Genome 走。历史保留，切换本身会作为一条新的
-`rsih.genome` 写进 session JSONL，并且会明确告知模型 harness 已经变了，避免它继续
+keybindings、模型、思考等级，以及它自己的 `extensions`。历史保留，切换本身会作为一条
+新的 `rsih.genome` 写进 session JSONL，并且会明确告知模型 harness 已经变了，避免它继续
 按上一个 Genome 的指令干活。由于恢复会话读的就是这条记录，之后 `rsih --continue`
 续上的是你**切换之后**的那个 Genome。
 
-有三样东西只能由 argv 传递，因此只有重启才能改变：`extensions`、
-`resources.isolate`、`appearance.no_themes`。另外，如果一个 Genome 用 base
-`system_prompt` 整体替换 Pi 的默认 preamble，切换时只能叠加而无法替换掉它。
-凡是没能完整切换的，都会同时告知你和模型——绝不会静默地只切一半。
+那次重画其实是一次重启。交互式的 `rsih` 会把 agent 作为一个与你共享终端的受监督子进程
+来跑；切换时子进程走 Pi 正常的退出路径结束，随后在同一个 session 文件上、以新 Genome
+重新拉起。Pi 有几样东西只在启动时从 argv 读一次——extensions、资源隔离开关、整体替换的
+base `system_prompt`——这条进程边界是改变它们的唯一办法。也正因如此，同一个命令在
+`rpc` / `print` 模式下改为原地切换：那些运行是被另一个程序驾驭的，进程一换它的流就断了。
+原地切换会拿走一个活着的会话能接受的一切，接受不了的会同时向你和模型如实报告。
 
 → [组件开发协议](genome/README.md) ·
 [贡献一个 Genome](genome-community-contribute.zh-CN.md)

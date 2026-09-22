@@ -214,18 +214,24 @@ context to one tuned for arguing with it:
 /switch-genome debate
 ```
 
-Instructions, tools, skills, prompt templates, themes, policies, settings,
-keybindings, model and thinking level all follow the new Genome. The transcript
-is kept, the switch is recorded in the session JSONL as a new `rsih.genome`
-entry, and the model is told the harness changed so it does not keep working to
-the previous Genome's instructions. Because the record is what a resume reads
-back, `rsih --continue` afterwards resumes under the Genome you switched *to*.
+In the terminal UI the switch is complete: the screen redraws once, and
+everything the new Genome declares is in force — instructions, tools, skills,
+prompt templates, themes, policies, settings, keybindings, model, thinking
+level, and its own `extensions`. The transcript is kept, the switch is
+recorded in the session JSONL as a new `rsih.genome` entry, and the model is
+told the harness changed so it does not keep working to the previous Genome's
+instructions. Because that record is what a resume reads back,
+`rsih --continue` afterwards resumes under the Genome you switched *to*.
 
-Three things only argv can deliver, so only a restart changes them:
-`extensions`, `resources.isolate`, and `appearance.no_themes`. A Genome whose
-base `system_prompt` replaces Pi's default preamble can be layered on top but
-not substituted for it. Whenever a switch is incomplete it says so, both to you
-and to the model — it never silently half-applies.
+The redraw is a restart. Interactive `rsih` runs the agent as a supervised
+child sharing your terminal; a switch ends the child through Pi's normal quit
+path and starts it again on the same session file under the new Genome. That
+process boundary is the only way to change what Pi reads from argv exactly
+once — extensions, resource isolation, a base `system_prompt` — which is why
+the same command in `rpc` or `print` mode switches in place instead: those
+runs are driven by another program that would lose its stream. An in-place
+switch takes everything a live session can take and reports, to you and to
+the model, anything it could not.
 
 → [Component protocol](genome/README.md) ·
 [Contributing a Genome](genome-community-contribute.md)

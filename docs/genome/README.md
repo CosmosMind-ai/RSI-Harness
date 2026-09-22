@@ -171,14 +171,21 @@ manifest 固定叫 `genome.json`：
 
 ### 哪些出口在会话中途还能再开一次
 
-`/switch-genome <name>` 之所以可行，是因为上面四个出口里有三个是可重入的：
+`/switch-genome <name>` 有两条实现路径，按运行模式自动选择，用户不需要知道：
 
-| 出口 | 中途换 Genome 时 |
+**TUI：重启进程。** 交互式 `rsih` 的 launcher 是一个 supervisor（`src/cli/supervisor.ts`），
+真正的 agent 是它的子进程。切换 = 子进程留下一份请求文件、走 Pi 自己的退出路径把终端
+交回来，supervisor 读到请求后在同一个 session 文件上以新 Genome 重新拉起。这是唯一能
+把下表第四行也换掉的办法，所以 TUI 里的切换是**完整**的。深度永远是两层，切多少次都一样。
+
+**RPC / print：原地切换。** 进程不能死（外层程序在驾驭它），只能靠可重入的出口：
+
+| 出口 | 原地切换时 |
 | --- | --- |
 | Extension 运行时 | `ctx.reload()` 会重跑 extension factory 并重建 ExtensionRunner，所以上一个 Genome 注册的 tool / command 整体作废——这正好补上 Pi 没有 `unregisterTool` 这件事 |
 | `settings.json` / `keybindings.json` | reload 会重读；托管键的释放逻辑本来就按「换 Genome 不留残留」设计 |
 | `resources_discover` | reload 时以 `reason: "reload"` 再触发一次，skill 路径先重置再合并，旧 Genome 的 skill 不会累积 |
-| Pi CLI 参数 | **冻结在启动时**。`--system-prompt` / `--append-system-prompt` 通过每轮的 `before_agent_start` 覆盖来补偿；`--extension`、`--no-*` 隔离开关、`--no-themes` 则只有重启能改 |
+| Pi CLI 参数 | **冻结在启动时**。`--system-prompt` / `--append-system-prompt` 通过每轮的 `before_agent_start` 覆盖来补偿；`--extension`、`--no-*` 隔离开关、`--no-themes` 原地换不了，会如实报告 |
 
 两条由此而来的实现约束，改这块代码时必须守住：
 

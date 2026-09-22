@@ -58,6 +58,11 @@ import {
 } from "./harness/pi-projection.ts";
 import { applyManagedConfiguration } from "./harness/settings-layer.ts";
 import { runGenomeCommand } from "./cli/genome-command.ts";
+import {
+  SUPERVISED_ENV,
+  SWITCHED_FROM_ENV,
+  writeSwitchRequest,
+} from "./cli/supervisor.ts";
 
 /** Kept in sync with package.json; shown in the header and settings stamp. */
 export const RSIH_VERSION = "0.1.0";
@@ -890,6 +895,18 @@ function reportGenomeSwitch(pi, ctx, announcement) {
 }
 
 /**
+ * A supervised restart is a switch that already happened: the Genome is fully
+ * loaded, nothing was left behind. Read once, so a later in-process reload
+ * does not announce it a second time.
+ */
+function restartAnnouncement(active) {
+  const from = process.env[SWITCHED_FROM_ENV];
+  if (!from) return undefined;
+  delete process.env[SWITCHED_FROM_ENV];
+  return { from, to: active.label, caveats: [] };
+}
+
+/**
  * `/switch-genome <name>` -- replace the running harness without losing the
  * conversation.
  *
@@ -949,6 +966,28 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
       // reload() refuses outright while the agent is streaming or compacting.
       await ctx.waitForIdle();
 
+      // Under the supervisor a switch is a restart on the same session file:
+      // the only route that also carries a Genome's argv-only parts across.
+      // The request is written before Pi's own quit path runs, and the
+      // supervisor picks it up once this process has handed the terminal back.
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      if (
+        ctx.mode === "tui" &&
+        process.env[SUPERVISED_ENV] === "1" &&
+        sessionFile
+      ) {
+        writeSwitchRequest(getPiAgentDir(), {
+          reference,
+          sessionFile,
+          from: previous.label,
+        });
+        ctx.shutdown();
+        return;
+      }
+
+      // No supervisor (RPC, print, or a session that is not being persisted):
+      // switch in place. Everything a live session can take is taken; what it
+      // cannot is reported rather than dropped.
       const caveats = unswitchableDifferences(previous.genome, next.genome);
       const probe = switchedSystemPrompt({
         base: ctx.getSystemPrompt(),
@@ -1127,8 +1166,9 @@ async function createGenomeExtension({
 
       // Reported here rather than in the command handler because `ctx.reload()`
       // tears the handler's session down: this is the first point at which the
-      // switched-to Genome is actually the one running.
-      const announcement = session.takeAnnouncement();
+      // switched-to Genome is actually the one running. A supervised restart
+      // arrives the same way, carrying its origin in the environment.
+      const announcement = session.takeAnnouncement() ?? restartAnnouncement(active);
       if (announcement) reportGenomeSwitch(pi, ctx, announcement);
 
       const prior = ctx.sessionManager
