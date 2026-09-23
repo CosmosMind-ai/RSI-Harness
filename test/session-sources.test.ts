@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   DEFAULT_SOURCE_IDS,
-  readExtraRoots,
   readSessions,
   SESSION_SOURCES,
 } from "../config/genomes/harness-rsi/extension/session-sources.ts";
@@ -44,19 +45,19 @@ function useCodexHome(t, root: string | undefined) {
   });
 }
 
-test("Pi prompt completeness accounts for message and text limits", (t) => {
+test("Pi coverage accounts for message limits independently of text truncation", (t) => {
   const root = fixture(t);
   const header = { type: "session", cwd };
   for (const count of [39, 40, 41]) {
     write(root, [header, ...Array.from({ length: count }, (_, i) => piUser(`request ${i}`))]);
-    const [record] = readExtraRoots([root]);
+    const [record] = readSessions([], [root]).records;
     assert.equal(record.prompts.length, Math.min(count, 40));
     assert.equal(record.promptsComplete, count <= 40, `count=${count}`);
     assert.deepEqual(record.samplingIssues, count <= 40 ? [] : ["prompt_limit"]);
   }
   write(root, [header, piUser("x".repeat(601))]);
-  const [record] = readExtraRoots([root]);
-  assert.equal(record.promptsComplete, false);
+  const [record] = readSessions([], [root]).records;
+  assert.equal(record.promptsComplete, true);
   assert.deepEqual(record.samplingIssues, ["prompt_truncated"]);
 });
 
@@ -78,18 +79,18 @@ test("overlapping roots and symlink aliases count each transcript once", (t) => 
   write(child, [{ type: "session", cwd }, piUser("one request")]);
   // Directory junctions do not require Windows Developer Mode/admin rights.
   symlinkSync(child, join(root, "alias"), process.platform === "win32" ? "junction" : "dir");
-  const records = readExtraRoots([root, child, root]);
+  const records = readSessions([], [root, child, root]).records;
   assert.equal(records.length, 1);
   assert.equal(records[0].prompts.length, 1);
 });
 
-test("malformed lines are skipped without claiming complete evidence", (t) => {
+test("malformed lines are reported separately from sampling coverage", (t) => {
   const root = fixture(t);
   const path = write(root, [{ type: "session", cwd }, piUser("before")]);
   writeFileSync(path, '{broken}\nnull\n[]\n' + JSON.stringify(piUser("after")) + '\n{"type":', { flag: "a" });
-  const [record] = readExtraRoots([root]);
+  const [record] = readSessions([], [root]).records;
   assert.deepEqual(record.prompts, ["before", "after"]);
-  assert.equal(record.promptsComplete, false);
+  assert.equal(record.promptsComplete, true);
   assert.deepEqual(record.samplingIssues, ["malformed_json"]);
 });
 
@@ -145,7 +146,7 @@ test("Codex rejects injected-only user messages as evidence and marks unsupporte
   write(root, [meta, { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md private instructions" }] } }]);
   const [record] = codex([root]);
   assert.deepEqual(record.prompts, []);
-  assert.equal(record.promptsComplete, false);
+  assert.equal(record.promptsComplete, true);
   assert.ok(record.samplingIssues.includes("no_user_events"));
 });
 
@@ -217,8 +218,10 @@ test("Codex counts unsupported files once even through overlapping custom roots"
   const scan = readSessions(["codex"], [store, store]);
   assert.equal(scan.records.length, 1);
   assert.equal(scan.records[0].source, "codex");
-  assert.equal(scan.skippedFiles, 3);
-  assert.equal(scan.sources[0].skippedFiles, 3);
+  assert.deepEqual(scan.skippedFiles, {
+    filtered: 0, unreadable: 0, missing_metadata: 2, unsupported_format: 1,
+  });
+  assert.deepEqual(scan.sources[0].skippedFiles, scan.skippedFiles);
 });
 
 test("Codex keeps distinct forks separate and excludes explicitly internal threads", (t) => {
@@ -229,4 +232,130 @@ test("Codex keeps distinct forks separate and excludes explicitly internal threa
   const records = codex([root]);
   assert.equal(records.length, 2);
   assert.ok(records.every((record) => record.prompts[0] === "shared request"));
+});
+
+
+test("Codex distinguishes exactly 40 prompts from a later nonempty 41st event", (t) => {
+  const root = fixture(t);
+  for (const count of [39, 40, 41]) {
+    write(root, [meta, ...Array.from({ length: count }, (_, i) => user(`request ${i}`)),
+      user("  "), { type: "response_item", payload: { role: "user", content: "mirror" } }]);
+    const [record] = codex([root]);
+    assert.equal(record.prompts.length, Math.min(count, 40));
+    assert.equal(record.promptsComplete, count <= 40);
+    assert.deepEqual(record.samplingIssues, count <= 40 ? [] : ["prompt_limit"]);
+  }
+  write(root, [meta, ...Array.from({ length: 40 }, () => user("request")),
+    user("  "), { type: "event_msg", payload: { type: "user_message", message: null } }, user("41st")]);
+  const [record] = codex([root]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["malformed_json", "prompt_limit"]);
+});
+
+test("Codex text truncation alone preserves coverage", (t) => {
+  const root = fixture(t);
+  write(root, [meta, user("x".repeat(601))]);
+  const [record] = codex([root]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, ["prompt_truncated"]);
+});
+
+test("Codex waits for late metadata before stopping or filtering", (t) => {
+  const root = fixture(t);
+  const requests = Array.from({ length: 41 }, () => user("request"));
+  write(root, [...requests, meta]);
+  const [record] = codex([root]);
+  assert.equal(record.cwd, cwd);
+  assert.equal(record.prompts.length, 40);
+  assert.deepEqual(record.samplingIssues, ["prompt_limit"]);
+  write(root, [...requests, { ...meta, payload: { ...meta.payload, source: "subagent" } }]);
+  assert.deepEqual(codex([root]), []);
+});
+
+test("Codex reports each skip reason separately and deduplicates filtered files", (t) => {
+  const root = fixture(t);
+  useCodexHome(t, root);
+  const store = join(root, "sessions");
+  mkdirSync(store);
+  write(store, [meta, user("human")]);
+  write(store, [{ ...meta, payload: { ...meta.payload, source: "internal" } }], "internal.jsonl");
+  write(store, [user("no metadata")], "missing.jsonl");
+  writeFileSync(join(store, "unsupported.jsonl.zst"), "synthetic placeholder");
+  mkdirSync(join(store, "directory.jsonl"));
+  symlinkSync(store, join(root, "archived_sessions"), process.platform === "win32" ? "junction" : "dir");
+  const scan = readSessions(["codex"], [store, store]);
+  assert.equal(scan.records.length, 1);
+  assert.deepEqual(scan.skippedFiles, {
+    filtered: 1, unreadable: 1, missing_metadata: 1, unsupported_format: 1,
+  });
+  assert.deepEqual(scan.sources[0].skippedFiles, scan.skippedFiles);
+});
+
+test("Pi and Claude cwd fallback never interprets a line cut by the byte window", (t) => {
+  const root = fixture(t);
+  const prefix = '{"cwd":"/must-not-be-used","padding":"';
+  writeFileSync(join(root, "cut.jsonl"), prefix + "x".repeat(64 * 1024) + '"}\n');
+  assert.deepEqual(readSessions([], [root]).records, []);
+  const claude = SESSION_SOURCES.find((source) => source.id === "claude")!;
+  assert.deepEqual(claude.read([root]), []);
+});
+
+test("a file appended during the read uses the initial size snapshot", (t) => {
+  const root = fixture(t);
+  const path = write(root, [meta, user("before")]);
+  const originalRead = fs.readSync;
+  let appended = false;
+  t.mock.method(fs, "readSync", (...args) => {
+    const count = Reflect.apply(originalRead, fs, args);
+    if (!appended) {
+      appended = true;
+      writeFileSync(path, JSON.stringify(user("appended later")) + "\n", { flag: "a" });
+    }
+    return count;
+  });
+  syncBuiltinESMExports();
+  try {
+    const [record] = codex([root]);
+    assert.deepEqual(record.prompts, ["before"]);
+    assert.equal(record.promptsComplete, true);
+    assert.deepEqual(record.samplingIssues, []);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("read errors are counted as unreadable and the file descriptor is closed", (t) => {
+  const root = fixture(t);
+  useCodexHome(t, root);
+  const store = join(root, "sessions");
+  mkdirSync(store);
+  write(store, [meta, user("request")]);
+  let descriptor: number | undefined;
+  t.mock.method(fs, "readSync", (fd) => {
+    descriptor = fd;
+    throw new Error("synthetic I/O failure");
+  });
+  syncBuiltinESMExports();
+  try {
+    const scan = readSessions(["codex"]);
+    assert.deepEqual(scan.records, []);
+    assert.deepEqual(scan.skippedFiles, {
+      filtered: 0, unreadable: 1, missing_metadata: 0, unsupported_format: 0,
+    });
+    assert.notEqual(descriptor, undefined);
+    assert.throws(() => fs.fstatSync(descriptor!), { code: "EBADF" });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("Codex preserves Windows drive and UNC workspace paths", (t) => {
+  const root = fixture(t);
+  const paths = [String.raw`C:\Users\Example\研究 project`, String.raw`\\server\share\project`];
+  paths.forEach((path, i) => write(root, [
+    { ...meta, payload: { ...meta.payload, cwd: path } }, user("request"),
+  ], `${i}.jsonl`));
+  assert.deepEqual(codex([root]).map((record) => record.cwd).sort(), paths.sort());
 });

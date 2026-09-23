@@ -151,12 +151,13 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 
 **读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex 最多读前 2 MiB，
 因为开头的注入上下文可能很长。各来源每个会话最多保留 40 条文本请求，每条保留
-600 个字符。达到字节或消息上限、文本截断、记录损坏时，`prompts_complete` 为
-`false`，`sampling_issues` 列出具体原因：
+600 个字符。`prompts_complete` 只表示采样覆盖范围：因字节上限、消息数量上限或
+读取错误而未读完时为 `false`。文本截断、损坏记录、缺少显式用户事件单独列入
+`sampling_issues`，由模型判断其影响，不改变覆盖标记：
 
 | 标记 | 含义 |
 | --- | --- |
-| `byte_limit` | 文件超出已读取的头部窗口（也可能正在追加） |
+| `byte_limit` | 文件在读取开始时的大小超出已读取窗口 |
 | `prompt_limit` | 存在超过 40 条的非空用户文本请求 |
 | `prompt_truncated` | 至少一条已保留请求超过 600 字符 |
 | `malformed_json` | 跳过了损坏或不符合记录形状的内容 |
@@ -164,16 +165,19 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 | `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
 
 损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`
-只描述已返回会话的文本采样，不代表检索了全部历史。关键词未命中也不能证明历史上
-没有相关工作。
+只描述已返回会话的采样覆盖范围，不保证文本保真，也不代表检索了全部历史。
+解析器在取得元数据并确认第 41 条非空请求后停止；诊断只覆盖实际检查过的记录。
+读取期间追加的内容留给下一次扫描。关键词未命中也不能证明历史上没有相关工作。
 
 相同文件的重复路径及符号链接别名只计算一次，内置来源先于 `roots` 认领文件；
 不同副本和 fork 仍然按不同文件计数，不根据文本内容去重，也不展开继承的 fork
 历史。分析习惯时，应留意 fork 之间重复的历史不能算作独立证据。
 
-无法读取、缺少元数据、明确排除的非用户线程，以及尚不支持的压缩 `.jsonl.zst`
-文件，计入 `session_files_skipped`；每个来源也报告 `files_skipped`。当前只支持
-普通 JSONL rollout，不读 `history.jsonl`，不扫描数据库；日志记录形状与测试来源见
+`session_files_skipped` 和每个来源的 `files_skipped` 均按原因返回计数：
+`filtered` 是主动排除的非用户线程，`unreadable` 是读取失败，`missing_metadata`
+是缺少工作区元数据，`unsupported_format` 是尚不支持的压缩 `.jsonl.zst` 文件。
+主动过滤不算读取失败。当前只支持普通 JSONL rollout，不读 `history.jsonl`，
+不扫描数据库；日志记录形状与测试来源见
 [`Codex fixtures`](../../test/fixtures/codex/README.md)。
 
 加一个 harness 仍然是往 `SESSION_SOURCES` 加一条记录和一个 reader，工作区聚合

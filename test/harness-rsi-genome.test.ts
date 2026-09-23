@@ -1022,19 +1022,45 @@ test("scan_workspaces integrates Codex evidence with Pi and reports skipped file
   }));
   assert.equal(result.details.sessions_found, 2);
   assert.equal(result.details.workspaces_found, 1);
-  assert.equal(result.details.session_files_skipped, 1);
+  assert.deepEqual(result.details.session_files_skipped, {
+    filtered: 0, unreadable: 0, missing_metadata: 0, unsupported_format: 1,
+  });
   const [workspace] = result.details.workspaces;
   assert.equal(workspace.sessions, 2);
   assert.equal(workspace.prompts_sampled, 2);
   assert.deepEqual(workspace.sources.map((source) => source.id).sort(), ["codex", "pi"]);
-  assert.equal(workspace.prompts_complete, false);
+  assert.equal(workspace.prompts_complete, true);
   assert.deepEqual(workspace.sampling_issues, ["malformed_json"]);
   assert.deepEqual(workspace.matched_keywords, ["Codex"]);
   assert.ok(workspace.session_files.includes(codexPath));
   assert.equal(workspace.session_files.length, 2);
-  assert.equal(result.details.sources_scanned.find((source) => source.id === "codex").files_skipped, 1);
+  assert.deepEqual(result.details.sources_scanned.find((source) => source.id === "codex").files_skipped, result.details.session_files_skipped);
   assert.match(result.content[0].text, /1 session files skipped/);
   assert.doesNotMatch(result.content[0].text, /synthetic-(injected|tool-output)-do-not-copy/);
+});
+
+test("scan_workspaces keeps filtered threads separate from coverage and read failures", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rsih-codex-filtered-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".codex", "sessions");
+  mkdirSync(directory, { recursive: true });
+  for (const source of ["cli", "subagent"]) {
+    writeFileSync(join(directory, `${source}.jsonl`), [
+      { type: "session_meta", payload: { cwd: "/workspace/decks", source } },
+      { type: "event_msg", payload: { type: "user_message", message: "x".repeat(601) } },
+    ].map((entry) => JSON.stringify(entry)).join("\n"));
+  }
+  const pi = await loadExtension();
+  const result = await withHome(home, () =>
+    pi.tools.get("scan_workspaces").execute("codex", { sources: ["codex"] }));
+  assert.equal(result.details.sessions_found, 1);
+  assert.deepEqual(result.details.session_files_skipped, {
+    filtered: 1, unreadable: 0, missing_metadata: 0, unsupported_format: 0,
+  });
+  assert.equal(result.details.workspaces[0].prompts_complete, true);
+  assert.deepEqual(result.details.workspaces[0].sampling_issues, ["prompt_truncated"]);
+  assert.match(result.content[0].text, /1 non-user session files intentionally filtered/);
+  assert.doesNotMatch(result.content[0].text, /Results do not cover the entire store/);
 });
 
 test("scan_workspaces reports an unavailable Codex store without reading the real home", async (t) => {

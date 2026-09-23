@@ -69,9 +69,18 @@ export interface SessionRecord {
   modified: Date;
   /** The user's own turns, truncated and capped. */
   prompts: string[];
-  /** True when all text prompts were read and retained without truncation. */
+  /** True when sampling covered the file without byte/prompt limits or read errors.
+   * Text fidelity and malformed records are reported separately in samplingIssues. */
   promptsComplete: boolean;
   samplingIssues: SamplingIssue[];
+}
+
+export type SkipReason = "filtered" | "unreadable" | "missing_metadata" | "unsupported_format";
+export type SkippedFiles = Record<SkipReason, number>;
+type TranscriptResult = SessionRecord | SkipReason;
+
+function skippedFiles(): SkippedFiles {
+  return { filtered: 0, unreadable: 0, missing_metadata: 0, unsupported_format: 0 };
 }
 
 export interface SourceScan {
@@ -80,23 +89,23 @@ export interface SourceScan {
   roots: string[];
   available: boolean;
   sessions: number;
-  skippedFiles: number;
+  skippedFiles: SkippedFiles;
 }
 
 export interface ScanResult {
   sources: SourceScan[];
   records: SessionRecord[];
   unknownSources: string[];
-  skippedFiles: number;
+  skippedFiles: SkippedFiles;
 }
 
 interface ReadContext {
   seen: Set<string>;
-  skippedFiles: number;
+  skippedFiles: SkippedFiles;
 }
 
 function readContext(): ReadContext {
-  return { seen: new Set(), skippedFiles: 0 };
+  return { seen: new Set(), skippedFiles: skippedFiles() };
 }
 
 /* ------------------------------------------------------------------ plumbing */
@@ -125,7 +134,7 @@ function readHead(path: string, bytes: number) {
     }
     return {
       text: buffer.subarray(0, read).toString("utf8"),
-      complete: read === fstatSync(fd).size,
+      complete: read === stat.size,
     };
   } catch {
     return undefined;
@@ -135,7 +144,7 @@ function readHead(path: string, bytes: number) {
 }
 
 /** Transcript files under a root, depth-bounded. */
-function transcriptFiles(root: string, depth: number, compressed = false): string[] {
+function transcriptFiles(root: string, depth: number, unsupportedSuffixes: readonly string[] = []): string[] {
   if (depth < 0 || !existsSync(root) || !isDirectory(root)) return [];
   let entries: string[];
   try {
@@ -147,53 +156,55 @@ function transcriptFiles(root: string, depth: number, compressed = false): strin
   for (const name of entries) {
     if (name.startsWith(".")) continue;
     const path = join(root, name);
-    if (name.endsWith(".jsonl") || (compressed && name.endsWith(".jsonl.zst"))) {
+    if (name.endsWith(".jsonl") || unsupportedSuffixes.some((suffix) => name.endsWith(suffix))) {
       files.push(path);
     } else if (isDirectory(path)) {
-      files.push(...transcriptFiles(path, depth - 1, compressed));
+      files.push(...transcriptFiles(path, depth - 1, unsupportedSuffixes));
     }
   }
   return files;
 }
 
+/** Parse one record at a time; callers can stop without retaining the whole window. */
+function* transcriptEntries(text: string, issues: Set<SamplingIssue>) {
+  let start = 0;
+  while (start < text.length) {
+    const newline = text.indexOf("\n", start);
+    const end = newline < 0 ? text.length : newline;
+    const line = text.slice(start, end).trim();
+    start = end + 1;
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      issues.add("malformed_json");
+      continue;
+    }
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) yield entry;
+    else issues.add("malformed_json");
+  }
+}
+
 function readTranscriptHead(path: string, bytes = TRANSCRIPT_HEAD_BYTES) {
   const head = readHead(path, bytes);
+  if (!head) return undefined;
   const issues = new Set<SamplingIssue>();
-  const entries: any[] = [];
-  if (!head) {
-    issues.add("read_error");
-    return { entries, issues, text: "" };
-  }
   let text = head.text;
   if (!head.complete) {
     issues.add("byte_limit");
-    // Never interpret a line cut by the byte window (including mid-UTF-8).
+    // Both record parsing and cwd fallback must ignore a cut line, including mid-UTF-8.
     text = text.slice(0, text.lastIndexOf("\n") + 1);
   }
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry = JSON.parse(trimmed);
-      if (entry && typeof entry === "object" && !Array.isArray(entry)) entries.push(entry);
-      else issues.add("malformed_json");
-    } catch {
-      issues.add("malformed_json");
-    }
-  }
-  return { entries, issues, text: head.text };
+  return { entries: transcriptEntries(text, issues), issues, text };
 }
 
-function clean(text: unknown) {
-  const flat = String(text ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!flat) return "";
-  return flat;
+function promptsComplete(issues: Set<SamplingIssue>) {
+  return !issues.has("byte_limit") && !issues.has("prompt_limit") && !issues.has("read_error");
 }
 
 function push(prompts: string[], text: unknown, issues: Set<SamplingIssue>) {
-  const value = clean(text);
+  const value = String(text ?? "").replace(/\s+/g, " ").trim();
   if (!value) return;
   if (prompts.length >= MAX_PROMPTS) {
     issues.add("prompt_limit");
@@ -243,18 +254,22 @@ function piUserText(content: unknown) {
     .join(" ");
 }
 
-function readPiTranscript(path: string, source: string): SessionRecord | undefined {
+function readPiTranscript(path: string, source: string): TranscriptResult {
   const stat = fileStat(path);
-  if (!stat) return undefined;
-  const { entries, issues, text } = readTranscriptHead(path);
-  const meta = entries.find((entry) => entry.type === "session");
-  const cwd = meta?.cwd ?? extractCwd(text);
-  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
+  if (!stat) return "unreadable";
+  const head = readTranscriptHead(path);
+  if (!head) return "unreadable";
+  const { entries, issues, text } = head;
+  let meta;
   const prompts: string[] = [];
   for (const entry of entries) {
+    if (entry.type === "session") meta ??= entry;
     if (entry.type !== "message" || entry.message?.role !== "user") continue;
     push(prompts, piUserText(entry.message.content), issues);
+    if (meta && issues.has("prompt_limit")) break;
   }
+  const cwd = meta?.cwd ?? extractCwd(text);
+  if (typeof cwd !== "string" || !cwd.trim()) return "missing_metadata";
   return {
     source,
     path,
@@ -263,7 +278,7 @@ function readPiTranscript(path: string, source: string): SessionRecord | undefin
     created: timestamp(meta?.timestamp, stat.created),
     modified: stat.modified,
     prompts,
-    promptsComplete: issues.size === 0,
+    promptsComplete: promptsComplete(issues),
     samplingIssues: [...issues],
   };
 }
@@ -271,29 +286,27 @@ function readPiTranscript(path: string, source: string): SessionRecord | undefin
 function readStore(
   roots: string[],
   source: string,
-  reader: (path: string, source: string) => SessionRecord | undefined,
+  reader: (path: string, source: string) => TranscriptResult,
   depth: number,
   context = readContext(),
+  unsupportedSuffixes: readonly string[] = [],
 ) {
   const records: SessionRecord[] = [];
   for (const root of roots) {
-    for (const file of transcriptFiles(root, depth, source === "codex")) {
+    for (const file of transcriptFiles(root, depth, unsupportedSuffixes)) {
       let identity: string;
       try {
         identity = realpathSync(file);
       } catch {
-        context.skippedFiles += 1;
+        context.skippedFiles.unreadable += 1;
         continue;
       }
       if (context.seen.has(identity)) continue;
       context.seen.add(identity);
-      // Compressed Codex rollouts are outside this reader's supported format.
-      const record = file.endsWith(".jsonl.zst") ? undefined : reader(file, source);
-      if (record) {
-        records.push(record);
-      } else {
-        context.skippedFiles += 1;
-      }
+      const result = unsupportedSuffixes.some((suffix) => file.endsWith(suffix))
+        ? "unsupported_format" : reader(file, source);
+      if (typeof result === "string") context.skippedFiles[result] += 1;
+      else records.push(result);
     }
   }
   return records;
@@ -322,22 +335,26 @@ function isClaudeTypedTurn(entry: any) {
   return !content.trimStart().startsWith("<");
 }
 
-function readClaudeTranscript(path: string, source: string): SessionRecord | undefined {
+function readClaudeTranscript(path: string, source: string): TranscriptResult {
   const stat = fileStat(path);
-  if (!stat) return undefined;
-  const { entries, issues, text } = readTranscriptHead(path);
+  if (!stat) return "unreadable";
+  const head = readTranscriptHead(path);
+  if (!head) return "unreadable";
+  const { entries, issues, text } = head;
   // The encoded directory name is lossy for paths that already contain dashes,
   // so take the cwd the entries carry.
-  const located = entries.find((entry) => typeof entry.cwd === "string" && entry.cwd);
-  const cwd = located?.cwd ?? extractCwd(text);
-  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
+  let located;
   const prompts: string[] = [];
   let first;
   for (const entry of entries) {
+    if (typeof entry.cwd === "string" && entry.cwd) located ??= entry;
     if (!isClaudeTypedTurn(entry)) continue;
     first ??= entry.timestamp;
     push(prompts, entry.message.content, issues);
+    if (located && issues.has("prompt_limit")) break;
   }
+  const cwd = located?.cwd ?? extractCwd(text);
+  if (typeof cwd !== "string" || !cwd.trim()) return "missing_metadata";
   return {
     source,
     path,
@@ -346,7 +363,7 @@ function readClaudeTranscript(path: string, source: string): SessionRecord | und
     created: timestamp(first ?? located?.timestamp, stat.created),
     modified: stat.modified,
     prompts,
-    promptsComplete: issues.size === 0,
+    promptsComplete: promptsComplete(issues),
     samplingIssues: [...issues],
   };
 }
@@ -357,25 +374,30 @@ function readClaudeStore(roots: string[], source: string, context = readContext(
 
 /* ---------------------------------------------------------- Codex rollouts */
 
-function readCodexTranscript(path: string, source: string): SessionRecord | undefined {
+function readCodexTranscript(path: string, source: string): TranscriptResult {
   const stat = fileStat(path);
-  if (!stat) return undefined;
-  const { entries, issues } = readTranscriptHead(path, CODEX_HEAD_BYTES);
-  const meta = entries.find((entry) => entry.type === "session_meta")?.payload;
-  if (typeof meta?.cwd !== "string" || !meta.cwd.trim()) return undefined;
-  // Subagents and internal threads receive machine-generated tasks; these are
-  // not independent evidence of the human user's habits.
-  if (
-    meta.source === "subagent" || meta.source === "internal" ||
-    (meta.source && typeof meta.source === "object" &&
-      ("subagent" in meta.source || "internal" in meta.source)) ||
-    (typeof meta.thread_source === "string" && meta.thread_source !== "user")
-  ) return undefined;
-
+  if (!stat) return "unreadable";
+  const head = readTranscriptHead(path, CODEX_HEAD_BYTES);
+  if (!head) return "unreadable";
+  const { entries, issues } = head;
+  let meta;
   const prompts: string[] = [];
   let userEvents = false;
   let responseUser = false;
   for (const entry of entries) {
+    if (entry.type === "session_meta" && meta === undefined) {
+      meta = entry.payload;
+      // Machine-generated tasks are deliberately excluded, not unreadable history.
+      if (
+        meta?.source === "subagent" || meta?.source === "internal" ||
+        (meta?.source && typeof meta.source === "object" &&
+          ("subagent" in meta.source || "internal" in meta.source)) ||
+        (typeof meta?.thread_source === "string" && meta.thread_source !== "user")
+      ) return "filtered";
+    }
+    // Look ahead to the 41st nonempty prompt: exactly 40 can still be complete.
+    // Metadata can arrive late, so do not stop before it has been checked.
+    if (meta && issues.has("prompt_limit")) break;
     const payload = entry.payload;
     if (entry.type === "response_item" && payload?.role === "user") responseUser = true;
     if (entry.type !== "event_msg" || payload?.type !== "user_message") continue;
@@ -387,7 +409,9 @@ function readCodexTranscript(path: string, source: string): SessionRecord | unde
     // response_item mirrors can contain injected AGENTS.md/environment text.
     // Only the explicit user event is evidence; repeated real requests stay.
     push(prompts, payload.message, issues);
+    if (meta && issues.has("prompt_limit")) break;
   }
+  if (typeof meta?.cwd !== "string" || !meta.cwd.trim()) return "missing_metadata";
   if (responseUser && !userEvents) issues.add("no_user_events");
   return {
     source,
@@ -397,7 +421,7 @@ function readCodexTranscript(path: string, source: string): SessionRecord | unde
     created: timestamp(meta.timestamp, stat.created),
     modified: stat.modified,
     prompts,
-    promptsComplete: issues.size === 0,
+    promptsComplete: promptsComplete(issues),
     samplingIssues: [...issues],
   };
 }
@@ -408,6 +432,8 @@ interface SourceDefinition {
   id: string;
   label: string;
   roots: () => string[];
+  /** Discover these suffixes to report unsupported files without opening them. */
+  unsupportedSuffixes?: readonly string[];
   read: (roots: string[], context?: ReadContext) => SessionRecord[];
 }
 
@@ -442,7 +468,10 @@ export const SESSION_SOURCES: readonly SourceDefinition[] = Object.freeze([
       const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
       return [join(home, "sessions"), join(home, "archived_sessions")];
     },
-    read: (roots, context) => readStore(roots, "codex", readCodexTranscript, 3, context),
+    unsupportedSuffixes: [".jsonl.zst"],
+    read(roots, context) {
+      return readStore(roots, "codex", readCodexTranscript, 3, context, this.unsupportedSuffixes);
+    },
   },
 ]);
 
@@ -471,7 +500,7 @@ export function readSessions(
     if (!wanted.has(source.id)) continue;
     const roots = source.roots();
     const available = roots.some(isDirectory);
-    const previousSkipped = context.skippedFiles;
+    const previousSkipped = { ...context.skippedFiles };
     const found = available ? source.read(roots, context) : [];
     records.push(...found);
     sources.push({
@@ -480,7 +509,9 @@ export function readSessions(
       roots,
       available,
       sessions: found.length,
-      skippedFiles: context.skippedFiles - previousSkipped,
+      skippedFiles: Object.fromEntries(
+        Object.entries(context.skippedFiles).map(([reason, count]) => [reason, count - previousSkipped[reason]]),
+      ) as SkippedFiles,
     });
   }
 
@@ -488,9 +519,4 @@ export function readSessions(
   // as custom or inflate either the workspace's session count or its evidence.
   records.push(...readPiStore([...extraRoots], "custom", context));
   return { sources, records, unknownSources, skippedFiles: context.skippedFiles };
-}
-
-/** Extra sessions roots the user names by hand, read as Pi-format transcripts. */
-export function readExtraRoots(roots: readonly string[]) {
-  return readPiStore([...roots], "custom");
 }

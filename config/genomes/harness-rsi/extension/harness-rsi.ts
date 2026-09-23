@@ -517,8 +517,13 @@ export default function harnessRsi(pi: ExtensionAPI) {
         .filter((source) => !source.available)
         .map((source) => source.id);
       const hints: string[] = [];
-      if (result.session_files_skipped > 0) {
-        hints.push(`${result.session_files_skipped} session files skipped (unreadable, unsupported, missing metadata, or non-user Codex threads). Results do not cover the entire store.`);
+      const skipped = result.session_files_skipped;
+      const unavailable = skipped.unreadable + skipped.missing_metadata + skipped.unsupported_format;
+      if (unavailable > 0) {
+        hints.push(`${unavailable} session files skipped (unreadable, unsupported, or missing metadata). Results do not cover the entire store.`);
+      }
+      if (skipped.filtered > 0) {
+        hints.push(`${skipped.filtered} non-user session files intentionally filtered; these are not read failures.`);
       }
       if (result.unknown_sources.length > 0) {
         hints.push(

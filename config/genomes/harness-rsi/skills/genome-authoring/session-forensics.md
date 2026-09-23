@@ -30,13 +30,19 @@ still Pi-format directories; select a custom Codex home before launching GEE.
 Check `sampling_issues` and `session_files_skipped` before interpreting the
 results. A missing keyword in a bounded sample does not mean an absent habit.
 Pi/Claude reads stop at 64 KiB per file; Codex stops at 2 MiB. All sources retain
-at most 40 text prompts per file and 600 characters per prompt. Bad lines and
-truncation make `prompts_complete` false. First-message excerpts can still contain
+at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
+only describes coverage: byte limits, prompt limits, or read errors make it false.
+Text truncation, malformed records and missing canonical user events remain in
+`sampling_issues` for you to weigh; a true coverage flag does not guarantee fidelity.
+Parsing stops after metadata and a 41st nonempty prompt are found, so diagnostics
+cover inspected records only. First-message excerpts can still contain
 private information: these are user prompts, not a redaction mechanism.
 
 Only plain Codex JSONL rollouts are supported. Compressed `.jsonl.zst`, missing
 metadata, unreadable files, and explicitly marked subagent/internal threads are
-reported as skipped. The scanner does not read databases or `history.jsonl`.
+reported separately in `session_files_skipped` (and each source's `files_skipped`):
+`unsupported_format`, `missing_metadata`, `unreadable`, and `filtered`. Intentional
+filtering of machine-generated tasks is not a read failure. The scanner does not read databases or `history.jsonl`.
 Path aliases are deduplicated; distinct forks and copied rollouts are not. Do not
 treat their shared history as independent evidence of repeated preferences.
 
