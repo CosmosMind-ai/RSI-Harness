@@ -55,7 +55,6 @@ export type SamplingIssue =
   | "prompt_limit"
   | "prompt_truncated"
   | "malformed_json"
-  | "read_error"
   | "no_user_events";
 
 export interface SessionRecord {
@@ -69,8 +68,9 @@ export interface SessionRecord {
   modified: Date;
   /** The user's own turns, truncated and capped. */
   prompts: string[];
-  /** True when sampling covered the file without byte/prompt limits or read errors.
-   * Text fidelity and malformed records are reported separately in samplingIssues. */
+  /** True when sampling covered the file without hitting the byte or prompt limit.
+   * A file we could not read has no record at all; it is counted as an unreadable
+   * skip. Text fidelity and malformed records stay in samplingIssues. */
   promptsComplete: boolean;
   samplingIssues: SamplingIssue[];
 }
@@ -200,7 +200,7 @@ function readTranscriptHead(path: string, bytes = TRANSCRIPT_HEAD_BYTES) {
 }
 
 function promptsComplete(issues: Set<SamplingIssue>) {
-  return !issues.has("byte_limit") && !issues.has("prompt_limit") && !issues.has("read_error");
+  return !issues.has("byte_limit") && !issues.has("prompt_limit");
 }
 
 function push(prompts: string[], text: unknown, issues: Set<SamplingIssue>) {

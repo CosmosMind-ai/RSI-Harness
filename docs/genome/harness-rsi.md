@@ -151,9 +151,10 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 
 **读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex 最多读前 2 MiB，
 因为开头的注入上下文可能很长。各来源每个会话最多保留 40 条文本请求，每条保留
-600 个字符。`prompts_complete` 只表示采样覆盖范围：因字节上限、消息数量上限或
-读取错误而未读完时为 `false`。文本截断、损坏记录、缺少显式用户事件单独列入
-`sampling_issues`，由模型判断其影响，不改变覆盖标记：
+600 个字符。`prompts_complete` 只表示采样覆盖范围：因字节上限或消息数量上限而
+未读完时为 `false`。读取失败的文件不会产生记录，只计入 `unreadable`。文本截断、
+损坏记录、缺少显式用户事件单独列入 `sampling_issues`，由模型判断其影响，
+不改变覆盖标记：
 
 | 标记 | 含义 |
 | --- | --- |
@@ -161,7 +162,6 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 | `prompt_limit` | 存在超过 40 条的非空用户文本请求 |
 | `prompt_truncated` | 至少一条已保留请求超过 600 字符 |
 | `malformed_json` | 跳过了损坏或不符合记录形状的内容 |
-| `read_error` | 文件读取失败 |
 | `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
 
 损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`

@@ -31,7 +31,8 @@ Check `sampling_issues` and `session_files_skipped` before interpreting the
 results. A missing keyword in a bounded sample does not mean an absent habit.
 Pi/Claude reads stop at 64 KiB per file; Codex stops at 2 MiB. All sources retain
 at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
-only describes coverage: byte limits, prompt limits, or read errors make it false.
+only describes coverage: a byte or prompt-count bound makes it false. A file that
+could not be read yields no session at all and is counted as `unreadable`.
 Text truncation, malformed records and missing canonical user events remain in
 `sampling_issues` for you to weigh; a true coverage flag does not guarantee fidelity.
 Parsing stops after metadata and a 41st nonempty prompt are found, so diagnostics
