@@ -820,6 +820,7 @@ async function withHome(home, run) {
     USERPROFILE: process.env.USERPROFILE,
     RSIH_CODING_AGENT_DIR: process.env.RSIH_CODING_AGENT_DIR,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+    CODEX_HOME: process.env.CODEX_HOME,
   };
   process.env.HOME = home;
   process.env.USERPROFILE = home;
@@ -827,6 +828,7 @@ async function withHome(home, run) {
   // resolved from whichever package.json is on PI_PACKAGE_DIR.
   process.env.RSIH_CODING_AGENT_DIR = join(home, ".rsih");
   process.env.PI_CODING_AGENT_DIR = join(home, ".rsih");
+  process.env.CODEX_HOME = join(home, ".codex");
   try {
     return await run();
   } finally {
@@ -995,6 +997,81 @@ test("scan_workspaces lists transcript files only for focused workspaces", async
   assert.equal(workspace.session_files.length, 1);
   assert.match(workspace.session_files[0], /--Users-x-decks--[/\\]s\.jsonl$/);
   assert.equal(workspace.session_files_omitted, 0);
+});
+
+test("scan_workspaces integrates Codex evidence with Pi and reports skipped files", async (t) => {
+  const home = writePiHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".codex", "sessions", "2026", "09", "01");
+  mkdirSync(directory, { recursive: true });
+  const codexPath = join(directory, "rollout.jsonl");
+  writeFileSync(codexPath, [
+    { type: "session_meta", payload: { cwd: "/Users/x/decks", source: "vscode" } },
+    { type: "event_msg", payload: { type: "user_message", message: "Codex deck request" } },
+    { type: "response_item", payload: { role: "user", content: "synthetic-injected-do-not-copy" } },
+    { type: "response_item", payload: { type: "function_call_output", output: "synthetic-tool-output-do-not-copy" } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + '\n{"broken":');
+  writeFileSync(join(directory, "unsupported.jsonl.zst"), "synthetic compressed placeholder");
+  const pi = await loadExtension();
+  const tool = pi.tools.get("scan_workspaces");
+  const result = await withHome(home, () => tool.execute("codex", {
+    sources: ["pi", "codex"],
+    roots: [join(home, ".pi", "agent", "sessions"), directory],
+    keywords: ["Codex"],
+    paths: ["/Users/x/decks"],
+  }));
+  assert.equal(result.details.sessions_found, 2);
+  assert.equal(result.details.workspaces_found, 1);
+  assert.deepEqual(result.details.session_files_skipped, {
+    filtered: 0, unreadable: 0, missing_metadata: 0, unsupported_format: 1,
+  });
+  const [workspace] = result.details.workspaces;
+  assert.equal(workspace.sessions, 2);
+  assert.equal(workspace.prompts_sampled, 2);
+  assert.deepEqual(workspace.sources.map((source) => source.id).sort(), ["codex", "pi"]);
+  assert.equal(workspace.prompts_complete, true);
+  assert.deepEqual(workspace.sampling_issues, ["malformed_json"]);
+  assert.deepEqual(workspace.matched_keywords, ["Codex"]);
+  assert.ok(workspace.session_files.includes(codexPath));
+  assert.equal(workspace.session_files.length, 2);
+  assert.deepEqual(result.details.sources_scanned.find((source) => source.id === "codex").files_skipped, result.details.session_files_skipped);
+  assert.match(result.content[0].text, /1 session files skipped/);
+  assert.doesNotMatch(result.content[0].text, /synthetic-(injected|tool-output)-do-not-copy/);
+});
+
+test("scan_workspaces keeps filtered threads separate from coverage and read failures", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rsih-codex-filtered-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".codex", "sessions");
+  mkdirSync(directory, { recursive: true });
+  for (const source of ["cli", "subagent"]) {
+    writeFileSync(join(directory, `${source}.jsonl`), [
+      { type: "session_meta", payload: { cwd: "/workspace/decks", source } },
+      { type: "event_msg", payload: { type: "user_message", message: "x".repeat(601) } },
+    ].map((entry) => JSON.stringify(entry)).join("\n"));
+  }
+  const pi = await loadExtension();
+  const result = await withHome(home, () =>
+    pi.tools.get("scan_workspaces").execute("codex", { sources: ["codex"] }));
+  assert.equal(result.details.sessions_found, 1);
+  assert.deepEqual(result.details.session_files_skipped, {
+    filtered: 1, unreadable: 0, missing_metadata: 0, unsupported_format: 0,
+  });
+  assert.equal(result.details.workspaces[0].prompts_complete, true);
+  assert.deepEqual(result.details.workspaces[0].sampling_issues, ["prompt_truncated"]);
+  assert.match(result.content[0].text, /1 non-user session files intentionally filtered/);
+  assert.doesNotMatch(result.content[0].text, /Results do not cover the entire store/);
+});
+
+test("scan_workspaces reports an unavailable Codex store without reading the real home", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rsih-codex-empty-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pi = await loadExtension();
+  const result = await withHome(home, () => pi.tools.get("scan_workspaces").execute("codex", { sources: ["codex"] }));
+  assert.equal(result.details.sources_scanned[0].available, false);
+  assert.equal(result.details.sessions_found, 0);
+  assert.deepEqual(result.details.unknown_sources, []);
+  assert.match(result.content[0].text, /No store on disk for: codex/);
 });
 
 /** Drive the selector component the way a terminal would. */

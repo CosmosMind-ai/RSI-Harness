@@ -136,7 +136,8 @@ gee            # == rsih :harness-rsi == rsih --genome harness-rsi
 **How it works.** GEE never asks what system prompt you want — it reads what you
 actually did. It starts by asking one question in conversation: what is this Genome
 for? Then it asks which session stores to analyze (RSIH's own is included by default;
-you can add Pi's `~/.pi/agent/sessions` and Claude Code's `~/.claude/projects`). It
+you can add Pi's `~/.pi/agent/sessions`, Claude Code's `~/.claude/projects`, and
+Codex's session and archive stores under `CODEX_HOME`, defaulting to `~/.codex`). It
 groups history by working directory, then aggregates tool-call histograms, frequent
 bash commands, hot files, and the corrections you keep repeating — aggregating first,
 reading raw text selectively, never dumping a whole JSONL into context. The scenario
@@ -299,14 +300,17 @@ bottom layer — values written there override the projections.
 **Works**: building Genomes end to end — 12 components covering Pi's whole
 configuration surface, inherit-by-default merging, the settings compilation layer,
 directory bundles, seeding and upgrades, and `harness-rsi` generating interactively
-from the RSIH, Pi, and Claude Code session stores.
+from the RSIH, Pi, Claude Code, and Codex session stores. Codex support reads
+plain JSONL rollouts using explicit user-message events, with a 2 MiB head limit
+per file. Sampling limits and skipped files are reported; compressed rollouts
+and history stored only in a database are not supported.
 
 **Not yet**: one-command remote installs. `genome install` accepts built-in names
 and local paths only, not git/npm URLs — for someone else's Genome, clone this
 repo and install from `examples/genomes/<name>`. There is no pre-publish
 redaction gate either — a Genome is distilled from private transcripts, and
 before sharing it must be able to flag absolute paths, intranet domains, and
-likely secrets. The Codex session store is not wired up yet.
+likely secrets.
 
 ## Development
 
