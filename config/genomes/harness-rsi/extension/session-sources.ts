@@ -2,13 +2,14 @@
  * Session readers for the harnesses a user actually arrives with.
  *
  * Almost nobody has RSIH history on the day they first run this Genome, so the
- * evidence has to come from wherever they have been working. Four stores are
+ * evidence has to come from wherever they have been working. Five stores are
  * supported today:
  *
  *   rsih    <agentDir>/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   pi      ~/.pi/agent/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   claude  ~/.claude/projects/<encoded cwd>/<uuid>.jsonl
  *   codex   $CODEX_HOME/sessions/YYYY/MM/DD/*.jsonl (+ archived_sessions)
+ *   copilot $COPILOT_HOME/session-state/<session id>/events.jsonl
  *
  * RSIH and Pi share a schema. Claude Code's differs enough to need its own
  * reader but is shaped the same way: a JSONL file per session under a directory
@@ -19,9 +20,9 @@
  *
  * Every read is bounded. These stores get large -- the Pi store on the machine
  * this was written against held 117 MB across 152 sessions -- so transcripts are
- * sampled from their heads. Pi and Claude use 64 KiB; Codex uses 2 MiB because
- * injected context can precede the first real user turn. Limits and malformed
- * records are reported rather than presented as complete evidence.
+ * sampled from their heads. Pi and Claude use 64 KiB; Codex and Copilot use
+ * 2 MiB because injected context can precede the first real user turn. Limits
+ * and malformed records are reported rather than presented as complete evidence.
  *
  * No model calls happen here, and no transcript body is returned to the caller.
  */
@@ -37,12 +38,13 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Head window for a transcript we have to parse ourselves. */
 const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
 const CODEX_HEAD_BYTES = 2 * 1024 * 1024;
+const COPILOT_HEAD_BYTES = 2 * 1024 * 1024;
 /** Prompts retained per session. Enough to characterise it, bounded for memory. */
 const MAX_PROMPTS = 40;
 /** Characters retained per prompt. */
@@ -55,7 +57,11 @@ export type SamplingIssue =
   | "prompt_limit"
   | "prompt_truncated"
   | "malformed_json"
-  | "no_user_events";
+  | "no_user_events"
+  | "workspace_changed"
+  | "unattributed_prompts"
+  | "unknown_user_source"
+  | "invalid_cwd";
 
 export interface SessionRecord {
   /** Source id: one of SESSION_SOURCES, or `custom` for a user-named root. */
@@ -68,7 +74,7 @@ export interface SessionRecord {
   modified: Date;
   /** The user's own turns, truncated and capped. */
   prompts: string[];
-  /** True when sampling covered the file without hitting the byte or prompt limit.
+  /** True when sampling covered attributable prompts without a coverage limit.
    * A file we could not read has no record at all; it is counted as an unreadable
    * skip. Text fidelity and malformed records stay in samplingIssues. */
   promptsComplete: boolean;
@@ -290,10 +296,12 @@ function readStore(
   depth: number,
   context = readContext(),
   unsupportedSuffixes: readonly string[] = [],
+  fileName?: string,
 ) {
   const records: SessionRecord[] = [];
   for (const root of roots) {
     for (const file of transcriptFiles(root, depth, unsupportedSuffixes)) {
+      if (fileName && basename(file) !== fileName) continue;
       let identity: string;
       try {
         identity = realpathSync(file);
@@ -426,6 +434,78 @@ function readCodexTranscript(path: string, source: string): TranscriptResult {
   };
 }
 
+/* ------------------------------------------------------ Copilot CLI events */
+
+function readCopilotTranscript(path: string, source: string): TranscriptResult {
+  const stat = fileStat(path);
+  if (!stat) return "unreadable";
+  const head = readTranscriptHead(path, COPILOT_HEAD_BYTES);
+  if (!head) return "unreadable";
+  const { entries, issues } = head;
+  let cwd: string | undefined;
+  let created: Date | undefined;
+  let started = false;
+  const prompts: string[] = [];
+  for (const entry of entries) {
+    const data = entry.data;
+    if (entry.type === "session.start" && entry.agentId === undefined) {
+      started = true;
+      if (data?.detachedFromSpawningParentSessionId) return "filtered";
+      created ??= timestamp(data?.startTime, timestamp(entry.timestamp, stat.created));
+    }
+    if (entry.agentId === undefined && (entry.type === "session.start" || entry.type === "session.resume" ||
+        entry.type === "session.context_changed")) {
+      const next = entry.type === "session.context_changed" ? data?.cwd : data?.context?.cwd;
+      if (next !== undefined || entry.type === "session.context_changed") {
+        if (typeof next !== "string" || !isAbsolute(next) || !next.trim()) {
+          issues.add("invalid_cwd");
+          if (prompts.length > 0) break;
+          cwd = undefined;
+          continue;
+        }
+        if (cwd && cwd !== next && prompts.length > 0) {
+          issues.add("workspace_changed");
+          break;
+        }
+        cwd = next;
+      }
+    }
+    if (cwd && started && issues.has("prompt_limit")) break;
+    if (entry.type !== "user.message" || entry.agentId !== undefined ||
+        data?.isAutopilotContinuation === true) continue;
+    if (data?.source !== undefined && data.source !== "user") {
+      if (data.source !== "system" &&
+          !(typeof data.source === "string" && data.source.startsWith("agent-"))) {
+        issues.add("unknown_user_source");
+      }
+      continue;
+    }
+    if (typeof data?.content !== "string") {
+      issues.add("malformed_json");
+      continue;
+    }
+    if (!cwd) {
+      issues.add("unattributed_prompts");
+      continue;
+    }
+    push(prompts, data.content, issues);
+  }
+  if (!cwd) return "missing_metadata";
+  return {
+    source,
+    path,
+    cwd,
+    bytes: stat.bytes,
+    created: created ?? stat.created,
+    modified: stat.modified,
+    prompts,
+    promptsComplete: promptsComplete(issues) &&
+      !issues.has("workspace_changed") && !issues.has("unattributed_prompts") &&
+      !issues.has("unknown_user_source") && !issues.has("invalid_cwd"),
+    samplingIssues: [...issues],
+  };
+}
+
 /* --------------------------------------------------------------------- sources */
 
 interface SourceDefinition {
@@ -472,6 +552,12 @@ export const SESSION_SOURCES: readonly SourceDefinition[] = Object.freeze([
     read(roots, context) {
       return readStore(roots, "codex", readCodexTranscript, 3, context, this.unsupportedSuffixes);
     },
+  },
+  {
+    id: "copilot",
+    label: "GitHub Copilot CLI",
+    roots: () => [join(process.env.COPILOT_HOME?.trim() || join(homedir(), ".copilot"), "session-state")],
+    read: (roots, context) => readStore(roots, "copilot", readCopilotTranscript, 1, context, [], "events.jsonl"),
   },
 ]);
 

@@ -126,7 +126,8 @@ gee            # == rsih :harness-rsi == rsih --genome harness-rsi
 **原理。** GEE 不问「你想要什么 system prompt」，它去读你真实干过什么。启动后先
 问你一句——这个 Genome 是干什么的；再让你勾选要分析的 session 库（RSIH 自己的默认
 包含，也可以加上 Pi 的 `~/.pi/agent/sessions`、Claude Code 的
-`~/.claude/projects`，以及 `CODEX_HOME`（默认 `~/.codex`）下的 Codex 会话与归档库）；
+`~/.claude/projects`、`CODEX_HOME`（默认 `~/.codex`）下的 Codex 会话与归档库，
+以及 `COPILOT_HOME`（默认 `~/.copilot`）下的 Copilot CLI `session-state`）；
 然后按工作目录归并历史，聚合出工具调用直方图、高频 bash
 命令、热点文件、你反复说过的纠正——先聚合再选择性读原文，从不把整份 JSONL 倒进
 上下文。最后拿你说的场景当尺子归类证据：哪个复现 pattern 该变成 skill、哪个该变成
@@ -270,9 +271,11 @@ Genome，是显式逃生阀。
 
 **能做的**：造 Genome 的能力是完整的——12 个组件覆盖 Pi 的整个配置面、
 inherit-by-default 合并、settings 编译层、目录型 bundle、种子化与升级、
-`harness-rsi` 从 RSIH、Pi、Claude Code、Codex 四种 session 来源交互式生成。
+`harness-rsi` 从 RSIH、Pi、Claude Code、Codex、Copilot CLI 五种 session 来源交互式生成。
 Codex 支持普通 JSONL rollout，从显式用户消息事件提取请求，每个文件最多读取前
-2 MiB；采样限制和跳过文件数会明确报告，暂不支持压缩 rollout 或仅存于数据库的历史。
+2 MiB；Copilot CLI 从每个会话的 `events.jsonl` 中提取根代理的用户消息，
+不读取 `session-store.db`。采样限制和跳过文件数会明确报告，暂不支持压缩 rollout
+或仅存于数据库的历史。
 
 **还没有的**：一条命令装远端 Genome。`genome install` 只认内置名和本地路径，
 不认 git/npm URL——要装别人的 Genome，先 clone 本仓库，再从

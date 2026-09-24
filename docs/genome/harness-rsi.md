@@ -81,8 +81,8 @@ config/genomes/harness-rsi/
    只回一个词就再追问一次。
 2. **问 session 范围，然后扫。** 这一问是真正的多选，所以用
    `AskUserQuestion` + `allowMultiple: true`——RSIH 自己的库默认包含，只问要不要
-   把 Pi、Claude Code 和 Codex 的也算进来，自由文本仍然开着（用户指定的 Pi 格式目录进
-   `roots`；其他 Codex 位置通过启动前设置 `CODEX_HOME` 选择）。然后 **`scan_workspaces`**
+   把 Pi、Claude Code、Codex 和 Copilot CLI 的也算进来，自由文本仍然开着（用户指定的 Pi 格式目录进
+   `roots`；其他 Codex/Copilot 位置通过启动前设置 `CODEX_HOME`/`COPILOT_HOME` 选择）。然后 **`scan_workspaces`**
    按工作目录归并 session 历史，返回**事实**：
    路径、哪几个 source 贡献了、session 数、字节数、时间跨度、用户开头几句原话的
    摘录。它不排序、不写描述——那是 agent 的活。transcript 正文只用于关键词匹配，
@@ -128,9 +128,12 @@ RSIH 是新的，所以大多数人第一次跑这个 Genome 时自己的库是�
 | `pi` | `~/.pi/agent/sessions/--<编码后的 cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<编码后的 cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` 和 `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
+| `copilot` | `<COPILOT_HOME>/session-state/<会话 ID>/events.jsonl` | Copilot CLI |
 
 默认只读 `rsih`，其余由用户在第 2 步显式勾选；`roots` 参数只读取用户指定的 Pi 格式
-目录。Codex 默认使用 `~/.codex`，可在启动前通过 `CODEX_HOME` 指定其他位置。同一个 cwd 在多个 source 都有历史时会归并成一个工作区，并标出各自的贡献
+目录。Codex 默认使用 `~/.codex`，可在启动前通过 `CODEX_HOME` 指定其他位置。
+Copilot CLI 默认使用 `~/.copilot`，可通过 `COPILOT_HOME` 指定。同一个 cwd 在多个
+source 都有历史时会归并成一个工作区，并标出各自的贡献
 （本机实测 `/Users/lx` 三个 source 都有）。
 
 Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一个按 cwd 命名的目录，
@@ -149,12 +152,27 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 不作为回退来源；没有用户事件但存在 user 消息时，返回 `no_user_events`。
 明确标注为 subagent 或内部线程的会话会跳过，避免把 agent 生成的任务当成人的偏好。
 
-**读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex 最多读前 2 MiB，
-因为开头的注入上下文可能很长。各来源每个会话最多保留 40 条文本请求，每条保留
-600 个字符。`prompts_complete` 只表示采样覆盖范围：因字节上限或消息数量上限而
-未读完时为 `false`。读取失败的文件不会产生记录，只计入 `unreadable`。文本截断、
-损坏记录、缺少显式用户事件单独列入 `sampling_issues`，由模型判断其影响，
-不改变覆盖标记：
+**Copilot CLI 使用事件日志。** 从 `session.start.data.context.cwd`（或后续
+`session.resume` / `session.context_changed`）取得工作区，只取根 agent 的
+`user.message.data.content`。排除带 `agentId` 的子代理事件、自动续写和有明确非用户
+`source` 的消息；`source` 缺失不能证明输入一定来自人。标记为 detached 的子会话
+整份跳过。若用户输入前还没有 cwd，会记录 `unattributed_prompts`；若在已有请求后
+切换工作区，会停止归属并记录 `workspace_changed`，不会把后续请求归入旧目录。
+只接受主代理事件中当前运行平台识别的绝对路径（WSL 下不识别 Windows
+路径）；无法确认的 cwd 记为 `invalid_cwd`，不能从 `repository` 或
+`branch` 猜测本地工作目录。
+未知的显式消息来源会排除并记录 `unknown_user_source`，不会假装采样完整。
+只读取 `session-state/<会话 ID>/events.jsonl`，不读 `session-store.db`。
+GitHub 的[配置目录文档](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference#session-state)
+说明存储位置，[SDK 事件参考](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events)
+说明事件字段，但 CLI 磁盘格式尚无面向第三方解析器的稳定性承诺。
+
+**读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex / Copilot 最多读前 2 MiB，
+以免长事件占满读取预算。各来源每个会话最多保留 40 条文本请求，每条保留
+600 个字符。`prompts_complete` 只表示可归属请求的采样覆盖范围：因字节上限、
+消息数量上限或 Copilot 工作区归属不明而未读完时为 `false`。读取失败的文件
+不会产生记录，只计入 `unreadable`。文本截断、损坏记录、缺少显式用户事件
+单独列入 `sampling_issues`；这些问题本身不改变覆盖标记：
 
 | 标记 | 含义 |
 | --- | --- |
@@ -163,6 +181,10 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 | `prompt_truncated` | 至少一条已保留请求超过 600 字符 |
 | `malformed_json` | 跳过了损坏或不符合记录形状的内容 |
 | `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
+| `workspace_changed` | Copilot 会话的 cwd 在用户请求后发生变化，后续请求不归入之前的工作区 |
+| `unattributed_prompts` | Copilot 在出现可用 cwd 前已有用户请求，未给这些请求猜测工作区 |
+| `unknown_user_source` | Copilot 消息带有无法确认的人类输入来源，已排除并标记采样不完整 |
+| `invalid_cwd` | Copilot 的 cwd 更新不是可验证的绝对路径；后续请求不归入原工作区 |
 
 损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`
 只描述已返回会话的采样覆盖范围，不保证文本保真，也不代表检索了全部历史。
@@ -175,10 +197,12 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 
 `session_files_skipped` 和每个来源的 `files_skipped` 均按原因返回计数：
 `filtered` 是主动排除的非用户线程，`unreadable` 是读取失败，`missing_metadata`
-是缺少工作区元数据，`unsupported_format` 是尚不支持的压缩 `.jsonl.zst` 文件。
-主动过滤不算读取失败。当前只支持普通 JSONL rollout，不读 `history.jsonl`，
-不扫描数据库；日志记录形状与测试来源见
-[`Codex fixtures`](../../test/fixtures/codex/README.md)。
+是缺少工作区元数据，`unsupported_format` 是尚不支持的 Codex 压缩 `.jsonl.zst`
+文件。主动过滤不算读取失败。Codex 只支持普通 JSONL rollout，不读
+`history.jsonl`；Copilot 只读每个会话的 `events.jsonl`，不扫描数据库。
+日志记录形状与测试来源见
+[`Codex fixtures`](../../test/fixtures/codex/README.md) 和
+[`Copilot fixtures`](../../test/fixtures/copilot/README.md)。
 
 加一个 harness 仍然是往 `SESSION_SOURCES` 加一条记录和一个 reader，工作区聚合
 不需要认识各来源的格式。

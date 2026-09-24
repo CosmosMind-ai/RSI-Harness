@@ -35,6 +35,27 @@ function codex(roots) {
   return source.read(roots);
 }
 
+function copilot(roots) {
+  const source = SESSION_SOURCES.find((source) => source.id === "copilot");
+  assert.ok(source, "Copilot CLI must be an opt-in source");
+  return source.read(roots);
+}
+
+function copilotEvents(root, entries, name = "session-1") {
+  const directory = join(root, name);
+  mkdirSync(directory, { recursive: true });
+  return write(directory, entries, "events.jsonl");
+}
+
+const copilotCwd = join(tmpdir(), "copilot-workspace");
+const copilotStart = {
+  type: "session.start", timestamp: date,
+  data: { context: { cwd: copilotCwd }, startTime: date },
+};
+const copilotUser = (content, extra = {}) => ({
+  type: "user.message", timestamp: date, data: { content, ...extra },
+});
+
 function useCodexHome(t, root: string | undefined) {
   const previous = process.env.CODEX_HOME;
   if (root === undefined) delete process.env.CODEX_HOME;
@@ -358,4 +379,193 @@ test("Codex preserves Windows drive and UNC workspace paths", (t) => {
     { ...meta, payload: { ...meta.payload, cwd: path } }, user("request"),
   ], `${i}.jsonl`));
   assert.deepEqual(codex([root]).map((record) => record.cwd).sort(), paths.sort());
+});
+
+test("Copilot CLI is opt-in and scans only per-session events.jsonl under COPILOT_HOME", (t) => {
+  const root = fixture(t);
+  const previous = process.env.COPILOT_HOME;
+  process.env.COPILOT_HOME = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previous;
+  });
+  const store = join(root, "session-state");
+  const file = copilotEvents(store, [copilotStart, copilotUser("A real task")]);
+  write(join(store, "session-1"), [copilotStart, copilotUser("not history")], "other.jsonl");
+  write(root, [copilotStart, copilotUser("not history")], "events.jsonl");
+  assert.deepEqual(SESSION_SOURCES.find((source) => source.id === "copilot")!.roots(), [store]);
+  assert.deepEqual(DEFAULT_SOURCE_IDS, ["rsih"]);
+  assert.deepEqual(readSessions([]).records, []);
+  const scan = readSessions(["copilot"]);
+  assert.equal(scan.sources[0].available, true);
+  assert.equal(scan.records.length, 1);
+  assert.equal(scan.records[0].path, file);
+  assert.deepEqual(scan.records[0].prompts, ["A real task"]);
+});
+
+test("Copilot CLI retains human user.message content, not injected or agent messages", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [
+    copilotStart,
+    copilotUser("first"),
+    copilotUser("explicit user", { source: "user", transformedContent: "model rewrite" }),
+    copilotUser("skill injection", { source: "system" }),
+    copilotUser("delegated", { source: "agent-explore" }),
+    copilotUser("unknown origin", { source: "skill" }),
+    copilotUser("auto continuation", { isAutopilotContinuation: true }),
+    { ...copilotUser("subagent prompt"), agentId: "child" },
+    { type: "system.message", data: { content: "system" } },
+    { type: "tool.execution_complete", data: { content: "tool result" } },
+    copilotUser("last"),
+  ]);
+  const [record] = copilot([root]);
+  assert.equal(record.cwd, copilotCwd);
+  assert.equal(record.created.toISOString(), date);
+  assert.deepEqual(record.prompts, ["first", "explicit user", "last"]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["unknown_user_source"]);
+});
+
+test("Copilot CLI uses the default home and deduplicates a selected log against Pi roots", (t) => {
+  const previous = process.env.COPILOT_HOME;
+  delete process.env.COPILOT_HOME;
+  t.after(() => {
+    if (previous === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previous;
+  });
+  assert.deepEqual(SESSION_SOURCES.find((source) => source.id === "copilot")!.roots(), [
+    join(homedir(), ".copilot", "session-state"),
+  ]);
+  const root = fixture(t);
+  const store = join(root, "session-state");
+  copilotEvents(store, [copilotStart, copilotUser("one")]);
+  process.env.COPILOT_HOME = root;
+  const scan = readSessions(["copilot"], [store]);
+  assert.equal(scan.records.length, 1);
+  assert.equal(scan.records[0].source, "copilot");
+});
+
+test("Copilot CLI reports missing cwd and filters detached sessions", (t) => {
+  const root = fixture(t);
+  const store = join(root, "session-state");
+  copilotEvents(store, [{ type: "session.start", data: {} }, copilotUser("no cwd")], "missing");
+  copilotEvents(store, [
+    { ...copilotStart, data: { ...copilotStart.data, detachedFromSpawningParentSessionId: "parent" } },
+    copilotUser("delegated task"),
+  ], "detached");
+  const previous = process.env.COPILOT_HOME;
+  process.env.COPILOT_HOME = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previous;
+  });
+  const result = readSessions(["copilot"]);
+  assert.deepEqual(result.skippedFiles, {
+    filtered: 1, unreadable: 0, missing_metadata: 1, unsupported_format: 0,
+  });
+  assert.deepEqual(result.sources[0].skippedFiles, result.skippedFiles);
+});
+
+test("Copilot CLI does not assign prompts after a workspace switch to the initial cwd", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [
+    copilotStart,
+    copilotUser("first"),
+    { type: "session.context_changed", data: { cwd: join(copilotCwd, "another") } },
+    copilotUser("different workspace"),
+  ]);
+  const [record] = copilot([root]);
+  assert.equal(record.cwd, copilotCwd);
+  assert.deepEqual(record.prompts, ["first"]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["workspace_changed"]);
+});
+
+test("Copilot CLI accepts native absolute workspaces but rejects relative cwd", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [copilotStart, copilotUser("request")], "valid");
+  const invalidPaths = ["relative/project", "another/relative"];
+  for (const [i, path] of invalidPaths.entries()) {
+    copilotEvents(root, [
+      { ...copilotStart, data: { ...copilotStart.data, context: { cwd: path } } },
+      copilotUser("must not be assigned a workspace"),
+    ], `invalid-${i}`);
+  }
+  assert.deepEqual(copilot([root]).map((record) => record.cwd), [copilotCwd]);
+  const previous = process.env.COPILOT_HOME;
+  process.env.COPILOT_HOME = join(root, "home");
+  const store = join(process.env.COPILOT_HOME, "session-state");
+  mkdirSync(store, { recursive: true });
+  for (const [i, path] of invalidPaths.entries()) {
+    copilotEvents(store, [
+      { ...copilotStart, data: { ...copilotStart.data, context: { cwd: path } } },
+      copilotUser("must not be assigned a workspace"),
+    ], `invalid-${i}`);
+  }
+  t.after(() => {
+    if (previous === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previous;
+  });
+  const scan = readSessions(["copilot"]);
+  assert.equal(scan.records.length, 0);
+  assert.equal(scan.skippedFiles.missing_metadata, invalidPaths.length);
+});
+
+test("Copilot CLI ignores subagent cwd changes and stops at an invalid root cwd", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [
+    copilotStart,
+    copilotUser("first"),
+    { type: "session.context_changed", agentId: "child", data: { cwd: join(copilotCwd, "subagent") } },
+    copilotUser("still in the original workspace"),
+    { type: "session.context_changed", data: { cwd: "relative/moved" } },
+    copilotUser("cannot attribute this"),
+  ]);
+  const [record] = copilot([root]);
+  assert.equal(record.cwd, copilotCwd);
+  assert.deepEqual(record.prompts, ["first", "still in the original workspace"]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["invalid_cwd"]);
+});
+
+test("Copilot CLI accepts resume cwd when no start cwd exists and reports earlier unattributed prompts", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [
+    { type: "session.start", timestamp: date, data: {} },
+    copilotUser("before cwd"),
+    { type: "session.resume", data: { context: { cwd: copilotCwd } } },
+    copilotUser("after cwd"),
+  ]);
+  const [record] = copilot([root]);
+  assert.deepEqual(record.prompts, ["after cwd"]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["unattributed_prompts"]);
+});
+
+test("Copilot CLI reports byte and prompt bounds rather than silently losing turns", (t) => {
+  const root = fixture(t);
+  const path = copilotEvents(root, [copilotStart, copilotUser("before")]);
+  writeFileSync(path, JSON.stringify({ type: "assistant.message", data: { content: "x".repeat(3 * 1024 * 1024) } }) + "\n" + JSON.stringify(copilotUser("after")) + "\n", { flag: "a" });
+  const [bounded] = copilot([root]);
+  assert.deepEqual(bounded.prompts, ["before"]);
+  assert.equal(bounded.promptsComplete, false);
+  assert.deepEqual(bounded.samplingIssues, ["byte_limit"]);
+  writeFileSync(path, [copilotStart, ...Array.from({ length: 41 }, (_, i) => copilotUser(`request ${i}`))].map(JSON.stringify).join("\n"));
+  const [limited] = copilot([root]);
+  assert.equal(limited.prompts.length, 40);
+  assert.deepEqual(limited.samplingIssues, ["prompt_limit"]);
+});
+
+test("Copilot CLI reads past 64 KiB and separates truncated text from coverage", (t) => {
+  const root = fixture(t);
+  copilotEvents(root, [
+    copilotStart,
+    { type: "assistant.message", data: { content: "x".repeat(1100 * 1024) } },
+    copilotUser("y".repeat(601)),
+  ]);
+  const [record] = copilot([root]);
+  assert.equal(record.prompts.length, 1);
+  assert.equal(record.prompts[0].length, 603);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, ["prompt_truncated"]);
 });

@@ -19,6 +19,7 @@ real `cwd` instead.
 | `pi` | `~/.pi/agent/sessions/--<encoded cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<encoded cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` and `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
+| `copilot` | `<COPILOT_HOME>/session-state/<session id>/events.jsonl` | GitHub Copilot CLI |
 
 RSIH is new, so most people have little or nothing in the first row and all of
 their real history in one of the others. **Check `sources` on the workspace
@@ -27,12 +28,16 @@ harness, and the schemas need different readers.
 
 Codex is opt-in, with `CODEX_HOME` defaulting to `~/.codex`. Custom `roots` are
 still Pi-format directories; select a custom Codex home before launching GEE.
+Copilot CLI is also opt-in, with `COPILOT_HOME` defaulting to `~/.copilot`.
+It reads per-session `events.jsonl`, not the cross-session `session-store.db`.
+Select a custom Copilot home before launching GEE; `roots` remain Pi-format.
 Check `sampling_issues` and `session_files_skipped` before interpreting the
 results. A missing keyword in a bounded sample does not mean an absent habit.
-Pi/Claude reads stop at 64 KiB per file; Codex stops at 2 MiB. All sources retain
-at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
-only describes coverage: a byte or prompt-count bound makes it false. A file that
-could not be read yields no session at all and is counted as `unreadable`.
+Pi/Claude reads stop at 64 KiB per file; Codex/Copilot stop at 2 MiB. All
+sources retain at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
+only describes coverage: a byte or prompt-count bound, or unattributable Copilot
+prompts, makes it false. A file that could not be read yields no session at all
+and is counted as `unreadable`.
 Text truncation, malformed records and missing canonical user events remain in
 `sampling_issues` for you to weigh; a true coverage flag does not guarantee fidelity.
 Parsing stops after metadata and a 41st nonempty prompt are found, so diagnostics
@@ -43,9 +48,21 @@ Only plain Codex JSONL rollouts are supported. Compressed `.jsonl.zst`, missing
 metadata, unreadable files, and explicitly marked subagent/internal threads are
 reported separately in `session_files_skipped` (and each source's `files_skipped`):
 `unsupported_format`, `missing_metadata`, `unreadable`, and `filtered`. Intentional
-filtering of machine-generated tasks is not a read failure. The scanner does not read databases or `history.jsonl`.
+filtering of machine-generated tasks is not a read failure. The scanner does
+not read databases or `history.jsonl`.
 Path aliases are deduplicated; distinct forks and copied rollouts are not. Do not
 treat their shared history as independent evidence of repeated preferences.
+
+Copilot's `workspace_changed` issue means the scanner stopped at a change of cwd
+after sampling user turns; later prompts are not assigned to the previous workspace.
+`unattributed_prompts` means user turns occurred before any cwd was available.
+`unknown_user_source` means a user-message event had an unrecognized source and
+was conservatively excluded. `invalid_cwd` means a cwd update was not an
+absolute path: prompts after it are not assigned to the old workspace. All four
+make `prompts_complete` false. A Copilot log without a usable absolute cwd is
+skipped as `missing_metadata`. GitHub documents the SDK event envelope, but
+does not guarantee a stable CLI on-disk schema across releases; treat unknown
+layouts as unsupported evidence, not an empty user history.
 
 ## Line shapes you will grep for
 
@@ -92,6 +109,67 @@ of the same request. Do not fall back to it, even when no user events were found
 Tool arguments are a JSON **string** and need a second parse before extracting
 `cmd`, `command`, or paths. Unlike Claude's legacy heuristic, genuine Codex user
 text beginning with `<` is not discarded.
+
+Copilot CLI records use a different event envelope:
+
+```jsonc
+{"type":"session.start","timestamp":"...","data":{"context":{"cwd":"/workspace/project"}}}
+{"type":"user.message","timestamp":"...","data":{"content":"what the user typed","source":"user"}}
+{"type":"tool.execution_start","data":{"toolName":"..."}}
+```
+
+Use `data.content` from root `user.message` events only, never
+`transformedContent`, assistant/system text or tool output. Reject events with
+`agentId`, `isAutopilotContinuation`, or an explicit non-user `source`. A missing
+`source` can be a normal user message; it is not proof of human origin, so
+corroborate important patterns. Unknown explicit sources are reported rather
+than silently discarded. Exclude `session.start` events marked as detached
+from a spawning parent session. Workspaces come from `session.start` or
+`session.resume` `data.context.cwd`, or `session.context_changed.data.cwd`.
+Only root events with an absolute cwd on the scanner's host platform can assign
+a workspace. A Windows path in a Copilot log read under WSL is not accepted.
+Only the first workspace's prompts are sampled if a session moves across workspaces;
+inspect the selected file carefully before attributing any later actions.
+
+For a **selected** Copilot CLI session, stream the JSONL and aggregate event
+types and root tool invocations before reading excerpts. Do not apply Pi/Claude
+greps or Codex `payload` selectors: Copilot uses `data` and its own event types.
+The SDK [event reference](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events)
+documents available fields, but the CLI file format is not a stable external API.
+
+```bash
+SESSION_FILE='<one selected events.jsonl path>'
+node --input-type=module - "$SESSION_FILE" <<'JS'
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+const events = new Map(), tools = new Map();
+let humanTurns = 0, malformed = 0, unknownSources = 0;
+for await (const line of createInterface({
+  input: createReadStream(process.argv[2]), crlfDelay: Infinity,
+})) {
+  if (!line.trim()) continue;
+  let event;
+  try { event = JSON.parse(line); } catch { malformed++; continue; }
+  if (!event || typeof event !== 'object') { malformed++; continue; }
+  events.set(event.type, (events.get(event.type) ?? 0) + 1);
+  const data = event.data;
+  if (event.type === 'user.message' && !event.agentId &&
+      data?.isAutopilotContinuation !== true) {
+    if (data?.source === undefined || data.source === 'user') humanTurns++;
+    else if (data.source !== 'system' &&
+             !(typeof data.source === 'string' && data.source.startsWith('agent-')))
+      unknownSources++;
+  }
+  if (event.type === 'tool.execution_start' && !event.agentId &&
+      typeof data?.toolName === 'string')
+    tools.set(data.toolName, (tools.get(data.toolName) ?? 0) + 1);
+}
+console.log(JSON.stringify({ humanTurns, malformed, unknownSources,
+  eventTypes: [...events].sort((a, b) => b[1] - a[1]),
+  tools: [...tools].sort((a, b) => b[1] - a[1]),
+}, null, 2));
+JS
+```
 
 For a **selected** Codex rollout, aggregate with Node's built-in JSON and line
 readers instead of using the Pi/Claude greps below. This streams the file and

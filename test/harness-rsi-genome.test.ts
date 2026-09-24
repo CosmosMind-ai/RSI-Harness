@@ -784,7 +784,7 @@ test("scan_workspaces says so when there is no history", async () => {
  * first run this Genome. Pi's store uses the same schema at a different root,
  * and reading it is what makes the Genome usable on day one.
  */
-function writePiHome() {
+function writePiHome(cwd = "/Users/x/decks") {
   const home = mkdtempSync(join(tmpdir(), "rsih-pi-home-"));
   const directory = join(home, ".pi", "agent", "sessions", "--Users-x-decks--");
   mkdirSync(directory, { recursive: true });
@@ -795,7 +795,7 @@ function writePiHome() {
         type: "session",
         version: 3,
         timestamp: "2026-07-01T00:00:00.000Z",
-        cwd: "/Users/x/decks",
+        cwd,
       }),
       JSON.stringify({
         type: "message",
@@ -821,6 +821,7 @@ async function withHome(home, run) {
     RSIH_CODING_AGENT_DIR: process.env.RSIH_CODING_AGENT_DIR,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
     CODEX_HOME: process.env.CODEX_HOME,
+    COPILOT_HOME: process.env.COPILOT_HOME,
   };
   process.env.HOME = home;
   process.env.USERPROFILE = home;
@@ -829,6 +830,7 @@ async function withHome(home, run) {
   process.env.RSIH_CODING_AGENT_DIR = join(home, ".rsih");
   process.env.PI_CODING_AGENT_DIR = join(home, ".rsih");
   process.env.CODEX_HOME = join(home, ".codex");
+  process.env.COPILOT_HOME = join(home, ".copilot");
   try {
     return await run();
   } finally {
@@ -1072,6 +1074,40 @@ test("scan_workspaces reports an unavailable Codex store without reading the rea
   assert.equal(result.details.sessions_found, 0);
   assert.deepEqual(result.details.unknown_sources, []);
   assert.match(result.content[0].text, /No store on disk for: codex/);
+});
+
+test("scan_workspaces merges Copilot CLI evidence and lists its event log only when focused", async (t) => {
+  const cwd = join(tmpdir(), "copilot-decks");
+  const home = writePiHome(cwd);
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const directory = join(home, ".copilot", "session-state", "session-id");
+  mkdirSync(directory, { recursive: true });
+  const events = join(directory, "events.jsonl");
+  writeFileSync(events, [
+    { type: "session.start", timestamp: "2026-09-01T00:00:00Z", data: { context: { cwd } } },
+    { type: "user.message", data: { content: "Copilot deck request", source: "user" } },
+    { type: "user.message", data: { content: "injected", source: "system" } },
+    { type: "user.message", agentId: "child", data: { content: "subagent" } },
+  ].map((entry) => JSON.stringify(entry)).join("\n"));
+  const pi = await loadExtension();
+  const tool = pi.tools.get("scan_workspaces");
+  const broad = await withHome(home, () => tool.execute("copilot", {
+    sources: ["pi", "copilot"], keywords: ["Copilot"],
+  }));
+  assert.equal(broad.details.sessions_found, 2);
+  assert.equal(broad.details.workspaces_found, 1);
+  const [workspace] = broad.details.workspaces;
+  assert.equal(workspace.sessions, 2);
+  assert.equal(workspace.prompts_sampled, 2);
+  assert.deepEqual(workspace.sources.map((source) => source.id).sort(), ["copilot", "pi"]);
+  assert.deepEqual(workspace.matched_keywords, ["Copilot"]);
+  assert.equal(workspace.session_files, undefined);
+  assert.doesNotMatch(broad.content[0].text, /injected|subagent/);
+
+  const focused = await withHome(home, () => tool.execute("copilot", {
+    sources: ["pi", "copilot"], paths: [cwd],
+  }));
+  assert.ok(focused.details.workspaces[0].session_files.includes(events));
 });
 
 /** Drive the selector component the way a terminal would. */
