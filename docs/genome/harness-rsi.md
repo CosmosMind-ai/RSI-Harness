@@ -128,9 +128,11 @@ RSIH 是新的，所以大多数人第一次跑这个 Genome 时自己的库是�
 | `pi` | `~/.pi/agent/sessions/--<编码后的 cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<编码后的 cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` 和 `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
+| `copilot` | `<COPILOT_HOME>/session-state/<session-id>/events.jsonl`，旁边的 `workspace.yaml` | GitHub Copilot CLI |
 
 默认只读 `rsih`，其余由用户在第 2 步显式勾选；`roots` 参数只读取用户指定的 Pi 格式
-目录。Codex 默认使用 `~/.codex`，可在启动前通过 `CODEX_HOME` 指定其他位置。同一个 cwd 在多个 source 都有历史时会归并成一个工作区，并标出各自的贡献
+目录。Codex 默认使用 `~/.codex`，Copilot 默认使用 `~/.copilot`，分别可在启动前通过
+`CODEX_HOME` 和 `COPILOT_HOME` 指定其他位置。同一个 cwd 在多个 source 都有历史时会归并成一个工作区，并标出各自的贡献
 （本机实测 `/Users/lx` 三个 source 都有）。
 
 Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一个按 cwd 命名的目录，
@@ -149,7 +151,13 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 不作为回退来源；没有用户事件但存在 user 消息时，返回 `no_user_events`。
 明确标注为 subagent 或内部线程的会话会跳过，避免把 agent 生成的任务当成人的偏好。
 
-**读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex 最多读前 2 MiB，
+**Copilot CLI 使用独立的用户事件。** 只读取
+`session-state/<session-id>/events.jsonl`，从 `session.start.data.context.cwd` 获取工作区，
+缺少时回退到同目录 `workspace.yaml` 的 `cwd`；只把 `user.message.data.content` 当作用户输入，
+不使用包含注入上下文的 `transformedContent`。本次支持范围是 Copilot CLI，不扫描 VS Code
+Copilot Chat 的私有存储，也不读取 `session-store.db`。
+
+**读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex / Copilot 最多读前 2 MiB，
 因为开头的注入上下文可能很长。各来源每个会话最多保留 40 条文本请求，每条保留
 600 个字符。`prompts_complete` 只表示采样覆盖范围：因字节上限或消息数量上限而
 未读完时为 `false`。读取失败的文件不会产生记录，只计入 `unreadable`。文本截断、
@@ -162,7 +170,7 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 | `prompt_limit` | 存在超过 40 条的非空用户文本请求 |
 | `prompt_truncated` | 至少一条已保留请求超过 600 字符 |
 | `malformed_json` | 跳过了损坏或不符合记录形状的内容 |
-| `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
+| `no_user_events` | 存在其他会话活动，但窗口内没有显式用户事件 |
 
 损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`
 只描述已返回会话的采样覆盖范围，不保证文本保真，也不代表检索了全部历史。
@@ -176,9 +184,10 @@ Claude 的 schema 与 Pi 不同，需要单独的 reader，但形状一致：一
 `session_files_skipped` 和每个来源的 `files_skipped` 均按原因返回计数：
 `filtered` 是主动排除的非用户线程，`unreadable` 是读取失败，`missing_metadata`
 是缺少工作区元数据，`unsupported_format` 是尚不支持的压缩 `.jsonl.zst` 文件。
-主动过滤不算读取失败。当前只支持普通 JSONL rollout，不读 `history.jsonl`，
-不扫描数据库；日志记录形状与测试来源见
-[`Codex fixtures`](../../test/fixtures/codex/README.md)。
+主动过滤不算读取失败。当前只支持普通 JSONL rollout；不读 `history.jsonl`、Copilot
+`session-store.db` 或 VS Code Copilot Chat 存储。日志记录形状与测试来源见
+[`Codex fixtures`](../../test/fixtures/codex/README.md) 和
+[`Copilot fixtures`](../../test/fixtures/copilot/README.md)。
 
 加一个 harness 仍然是往 `SESSION_SOURCES` 加一条记录和一个 reader，工作区聚合
 不需要认识各来源的格式。

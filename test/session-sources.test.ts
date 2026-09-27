@@ -35,6 +35,12 @@ function codex(roots) {
   return source.read(roots);
 }
 
+function copilot(roots) {
+  const source = SESSION_SOURCES.find((source) => source.id === "copilot");
+  assert.ok(source, "Copilot CLI must be a supported, opt-in source");
+  return source.read(roots);
+}
+
 function useCodexHome(t, root: string | undefined) {
   const previous = process.env.CODEX_HOME;
   if (root === undefined) delete process.env.CODEX_HOME;
@@ -42,6 +48,16 @@ function useCodexHome(t, root: string | undefined) {
   t.after(() => {
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
+  });
+}
+
+function useCopilotHome(t, root: string | undefined) {
+  const previous = process.env.COPILOT_HOME;
+  if (root === undefined) delete process.env.COPILOT_HOME;
+  else process.env.COPILOT_HOME = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previous;
   });
 }
 
@@ -104,6 +120,106 @@ test("Codex reads canonical user events without duplicating model-visible messag
   assert.deepEqual(record.prompts, ["Build a slide deck", "Build a slide deck", "<tag> is literal user input"]);
   assert.equal(record.promptsComplete, true);
   assert.deepEqual(record.samplingIssues, []);
+});
+
+test("Copilot reads canonical user messages and ignores transformed or tool content", (t) => {
+  const root = fixture(t);
+  const store = join(root, "session-state", "copilot-fixture");
+  mkdirSync(store, { recursive: true });
+  cpSync(join(import.meta.dirname, "fixtures", "copilot", "events.jsonl"), join(store, "events.jsonl"));
+  cpSync(join(import.meta.dirname, "fixtures", "copilot", "workspace.yaml"), join(store, "workspace.yaml"));
+  const [record] = copilot([join(root, "session-state")]);
+  assert.equal(record.source, "copilot");
+  assert.equal(record.cwd, "/workspace/copilot-fixture");
+  assert.equal(record.created.toISOString(), date);
+  assert.deepEqual(record.prompts, ["Build the harness", "Run the focused tests"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, []);
+});
+
+test("Copilot falls back to workspace.yaml for the working directory", (t) => {
+  const root = fixture(t);
+  const store = join(root, "session-state", "fallback");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "events.jsonl"), [
+    { type: "session.start", data: { context: { repository: "org/repo", branch: "main" } }, timestamp: date },
+    { type: "user.message", data: { content: "Use the workspace path" } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  writeFileSync(join(store, "workspace.yaml"), String.raw`id: fallback
+cwd: 'C:\Users\Example\project'
+`);
+  const [record] = copilot([join(root, "session-state")]);
+  assert.equal(record.cwd, "C:\\Users\\Example\\project");
+  assert.deepEqual(record.prompts, ["Use the workspace path"]);
+});
+
+test("Copilot uses COPILOT_HOME only when selected and reads events.jsonl only", (t) => {
+  const root = fixture(t);
+  useCopilotHome(t, root);
+  const store = join(root, "session-state", "selected");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "events.jsonl"), [
+    { type: "session.start", data: { context: { cwd } } },
+    { type: "user.message", data: { content: "selected session" } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  writeFileSync(join(store, "selected.jsonl"), JSON.stringify({ type: "user.message", data: { content: "must be ignored" } }));
+  writeFileSync(join(root, "history.jsonl"), JSON.stringify({ type: "user.message", data: { content: "must be ignored" } }));
+  assert.deepEqual(DEFAULT_SOURCE_IDS, ["rsih"]);
+  assert.deepEqual(readSessions([]).records, []);
+  const source = SESSION_SOURCES.find((source) => source.id === "copilot")!;
+  assert.deepEqual(source.roots(), [join(root, "session-state")]);
+  const scan = readSessions(["copilot"]);
+  assert.equal(scan.records.length, 1);
+  assert.deepEqual(scan.records[0].prompts, ["selected session"]);
+});
+
+test("Copilot uses the default home when COPILOT_HOME is unset", (t) => {
+  useCopilotHome(t, undefined);
+  const source = SESSION_SOURCES.find((source) => source.id === "copilot")!;
+  assert.deepEqual(source.roots(), [join(homedir(), ".copilot", "session-state")]);
+});
+
+test("Copilot reports prompt and byte limits without claiming complete coverage", (t) => {
+  const root = fixture(t);
+  const store = join(root, "session-state", "limits");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "events.jsonl"), [
+    { type: "session.start", data: { context: { cwd } } },
+    ...Array.from({ length: 41 }, (_, i) => ({ type: "user.message", data: { content: `request ${i}` } })),
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const [limited] = copilot([join(root, "session-state")]);
+  assert.equal(limited.prompts.length, 40);
+  assert.equal(limited.promptsComplete, false);
+  assert.deepEqual(limited.samplingIssues, ["prompt_limit"]);
+
+  writeFileSync(join(store, "events.jsonl"), [
+    { type: "session.start", data: { context: { cwd } } },
+    { type: "assistant.message", data: { content: "x".repeat(3 * 1024 * 1024) } },
+    { type: "user.message", data: { content: "beyond the bounded head" } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const [bounded] = copilot([join(root, "session-state")]);
+  assert.deepEqual(bounded.prompts, []);
+  assert.equal(bounded.promptsComplete, false);
+  assert.ok(bounded.samplingIssues.includes("byte_limit"));
+});
+
+test("Copilot skips malformed user records but keeps later canonical prompts", (t) => {
+  const root = fixture(t);
+  const store = join(root, "session-state", "malformed");
+  mkdirSync(store, { recursive: true });
+  const path = join(store, "events.jsonl");
+  writeFileSync(path, [
+    JSON.stringify({ type: "session.start", data: { context: { cwd } } }),
+    "{broken}",
+    JSON.stringify({ type: "user.message", data: { content: "before" } }),
+    JSON.stringify({ type: "user.message", data: { content: { injected: true } } }),
+    JSON.stringify({ type: "assistant.message", data: { content: "not a prompt" } }),
+    JSON.stringify({ type: "user.message", data: { content: "after", transformedContent: "<context>after</context>" } }),
+  ].join("\n") + "\n");
+  const [record] = copilot([join(root, "session-state")]);
+  assert.deepEqual(record.prompts, ["before", "after"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, ["malformed_json"]);
 });
 
 test("Codex discovers dated and archived rollouts using CODEX_HOME only when selected", (t) => {

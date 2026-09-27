@@ -19,18 +19,20 @@ real `cwd` instead.
 | `pi` | `~/.pi/agent/sessions/--<encoded cwd>--/*.jsonl` | Pi |
 | `claude` | `~/.claude/projects/<encoded cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` and `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
+| `copilot` | `<COPILOT_HOME>/session-state/<session-id>/events.jsonl` plus `workspace.yaml` | GitHub Copilot CLI |
 
 RSIH is new, so most people have little or nothing in the first row and all of
 their real history in one of the others. **Check `sources` on the workspace
 before choosing a recipe** — a workspace can carry history from more than one
 harness, and the schemas need different readers.
 
-Codex is opt-in, with `CODEX_HOME` defaulting to `~/.codex`. Custom `roots` are
-still Pi-format directories; select a custom Codex home before launching GEE.
+Codex and Copilot are opt-in, with `CODEX_HOME` and `COPILOT_HOME` defaulting to
+`~/.codex` and `~/.copilot`. Custom `roots` are still Pi-format directories;
+select a custom harness home before launching GEE.
 Check `sampling_issues` and `session_files_skipped` before interpreting the
 results. A missing keyword in a bounded sample does not mean an absent habit.
-Pi/Claude reads stop at 64 KiB per file; Codex stops at 2 MiB. All sources retain
-at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
+Pi/Claude reads stop at 64 KiB per file; Codex/Copilot stop at 2 MiB. All sources
+retain at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
 only describes coverage: a byte or prompt-count bound makes it false. A file that
 could not be read yields no session at all and is counted as `unreadable`.
 Text truncation, malformed records and missing canonical user events remain in
@@ -39,8 +41,8 @@ Parsing stops after metadata and a 41st nonempty prompt are found, so diagnostic
 cover inspected records only. First-message excerpts can still contain
 private information: these are user prompts, not a redaction mechanism.
 
-Only plain Codex JSONL rollouts are supported. Compressed `.jsonl.zst`, missing
-metadata, unreadable files, and explicitly marked subagent/internal threads are
+Only plain Codex and Copilot JSONL records are supported. Compressed `.jsonl.zst`,
+missing metadata, unreadable files, and explicitly marked subagent/internal threads are
 reported separately in `session_files_skipped` (and each source's `files_skipped`):
 `unsupported_format`, `missing_metadata`, `unreadable`, and `filtered`. Intentional
 filtering of machine-generated tasks is not a read failure. The scanner does not read databases or `history.jsonl`.
@@ -92,6 +94,20 @@ of the same request. Do not fall back to it, even when no user events were found
 Tool arguments are a JSON **string** and need a second parse before extracting
 `cmd`, `command`, or paths. Unlike Claude's legacy heuristic, genuine Codex user
 text beginning with `<` is not discarded.
+
+Copilot CLI keeps one JSON object per line in each session's `events.jsonl`:
+
+```jsonc
+{"type":"session.start","data":{"context":{"cwd":"/workspace/project","repository":"org/repo","branch":"main"}, ...}}
+{"type":"user.message","data":{"content":"what the user typed","transformedContent":"<injected context>..."}}
+{"type":"assistant.message","data":{"content":"the model response","toolRequests":[...]}}
+```
+
+Use `session.start.data.context.cwd`, falling back to the adjacent
+`workspace.yaml` `cwd`. Use only `user.message.data.content`; do not use
+`transformedContent`, assistant messages, or tool events as user evidence.
+Copilot CLI is the supported scope here; do not infer a reader for VS Code
+Copilot Chat's private storage.
 
 For a **selected** Codex rollout, aggregate with Node's built-in JSON and line
 readers instead of using the Pi/Claude greps below. This streams the file and

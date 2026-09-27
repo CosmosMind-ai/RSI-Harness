@@ -126,7 +126,8 @@ gee            # == rsih :harness-rsi == rsih --genome harness-rsi
 **原理。** GEE 不问「你想要什么 system prompt」，它去读你真实干过什么。启动后先
 问你一句——这个 Genome 是干什么的；再让你勾选要分析的 session 库（RSIH 自己的默认
 包含，也可以加上 Pi 的 `~/.pi/agent/sessions`、Claude Code 的
-`~/.claude/projects`，以及 `CODEX_HOME`（默认 `~/.codex`）下的 Codex 会话与归档库）；
+`~/.claude/projects`、`CODEX_HOME`（默认 `~/.codex`）下的 Codex 会话与归档库，
+以及 GitHub Copilot CLI 的 `COPILOT_HOME`（默认 `~/.copilot`）会话库）；
 然后按工作目录归并历史，聚合出工具调用直方图、高频 bash
 命令、热点文件、你反复说过的纠正——先聚合再选择性读原文，从不把整份 JSONL 倒进
 上下文。最后拿你说的场景当尺子归类证据：哪个复现 pattern 该变成 skill、哪个该变成

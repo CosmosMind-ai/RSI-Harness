@@ -2,13 +2,14 @@
  * Session readers for the harnesses a user actually arrives with.
  *
  * Almost nobody has RSIH history on the day they first run this Genome, so the
- * evidence has to come from wherever they have been working. Four stores are
+ * evidence has to come from wherever they have been working. Five stores are
  * supported today:
  *
  *   rsih    <agentDir>/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   pi      ~/.pi/agent/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
  *   claude  ~/.claude/projects/<encoded cwd>/<uuid>.jsonl
  *   codex   $CODEX_HOME/sessions/YYYY/MM/DD/*.jsonl (+ archived_sessions)
+ *   copilot $COPILOT_HOME/session-state/<uuid>/events.jsonl (+ workspace.yaml)
  *
  * RSIH and Pi share a schema. Claude Code's differs enough to need its own
  * reader but is shaped the same way: a JSONL file per session under a directory
@@ -19,9 +20,9 @@
  *
  * Every read is bounded. These stores get large -- the Pi store on the machine
  * this was written against held 117 MB across 152 sessions -- so transcripts are
- * sampled from their heads. Pi and Claude use 64 KiB; Codex uses 2 MiB because
- * injected context can precede the first real user turn. Limits and malformed
- * records are reported rather than presented as complete evidence.
+ * sampled from their heads. Pi and Claude use 64 KiB; Codex and Copilot use 2 MiB
+ * because injected context can precede the first real user turn. Limits and
+ * malformed records are reported rather than presented as complete evidence.
  *
  * No model calls happen here, and no transcript body is returned to the caller.
  */
@@ -37,12 +38,14 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Head window for a transcript we have to parse ourselves. */
 const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
 const CODEX_HEAD_BYTES = 2 * 1024 * 1024;
+const COPILOT_HEAD_BYTES = 2 * 1024 * 1024;
+const COPILOT_WORKSPACE_HEAD_BYTES = 16 * 1024;
 /** Prompts retained per session. Enough to characterise it, bounded for memory. */
 const MAX_PROMPTS = 40;
 /** Characters retained per prompt. */
@@ -290,10 +293,12 @@ function readStore(
   depth: number,
   context = readContext(),
   unsupportedSuffixes: readonly string[] = [],
+  fileFilter: (path: string) => boolean = () => true,
 ) {
   const records: SessionRecord[] = [];
   for (const root of roots) {
     for (const file of transcriptFiles(root, depth, unsupportedSuffixes)) {
+      if (!fileFilter(file)) continue;
       let identity: string;
       try {
         identity = realpathSync(file);
@@ -426,6 +431,92 @@ function readCodexTranscript(path: string, source: string): TranscriptResult {
   };
 }
 
+/* ------------------------------------------------------ Copilot CLI sessions */
+
+/**
+ * Copilot CLI stores a flat, scalar workspace.yaml beside events.jsonl. Keep
+ * this deliberately narrow: the file is a cwd fallback, not a second source
+ * of transcript records, and adding a YAML dependency would not buy us more
+ * reliable metadata for this schema.
+ */
+function workspaceCwd(path: string) {
+  const head = readHead(join(dirname(path), "workspace.yaml"), COPILOT_WORKSPACE_HEAD_BYTES);
+  if (!head) return undefined;
+  const text = head.complete ? head.text : head.text.slice(0, head.text.lastIndexOf("\n") + 1);
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*cwd\s*:\s*(.*?)\s*$/.exec(line);
+    if (!match) continue;
+    const value = match[1].trim();
+    if (!value) return undefined;
+    if (value.startsWith('"') && value.endsWith('"')) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value.slice(1, -1);
+      }
+    }
+    if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/g, "'");
+    return value;
+  }
+  return undefined;
+}
+
+function readCopilotTranscript(path: string, source: string): TranscriptResult {
+  const stat = fileStat(path);
+  if (!stat) return "unreadable";
+  const head = readTranscriptHead(path, COPILOT_HEAD_BYTES);
+  if (!head) return "unreadable";
+  const { entries, issues } = head;
+  let sessionStart;
+  let firstUserTimestamp;
+  let sawNonUserEvent = false;
+  let userEvents = false;
+  const prompts: string[] = [];
+  for (const entry of entries) {
+    if (entry.type === "session.start" && sessionStart === undefined) sessionStart = entry;
+    if (entry.type !== "session.start" && entry.type !== "user.message") sawNonUserEvent = true;
+    // Metadata may be late in a bounded window; check it before deciding to stop.
+    if (sessionStart && issues.has("prompt_limit")) break;
+    if (entry.type !== "user.message") continue;
+    userEvents = true;
+    firstUserTimestamp ??= entry.timestamp;
+    if (typeof entry.data?.content !== "string") {
+      issues.add("malformed_json");
+      continue;
+    }
+    // transformedContent includes injected context; data.content is the typed turn.
+    push(prompts, entry.data.content, issues);
+  }
+  const context = sessionStart?.data?.context;
+  const cwd = typeof context?.cwd === "string" && context.cwd.trim()
+    ? context.cwd : workspaceCwd(path);
+  if (typeof cwd !== "string" || !cwd.trim()) return "missing_metadata";
+  if (sawNonUserEvent && !userEvents) issues.add("no_user_events");
+  return {
+    source,
+    path,
+    cwd,
+    bytes: stat.bytes,
+    created: timestamp(sessionStart?.timestamp ?? firstUserTimestamp, stat.created),
+    modified: stat.modified,
+    prompts,
+    promptsComplete: promptsComplete(issues),
+    samplingIssues: [...issues],
+  };
+}
+
+function readCopilotStore(roots: string[], source: string, context = readContext()) {
+  return readStore(
+    roots,
+    source,
+    readCopilotTranscript,
+    2,
+    context,
+    [],
+    (path) => basename(path) === "events.jsonl",
+  );
+}
+
 /* --------------------------------------------------------------------- sources */
 
 interface SourceDefinition {
@@ -472,6 +563,15 @@ export const SESSION_SOURCES: readonly SourceDefinition[] = Object.freeze([
     read(roots, context) {
       return readStore(roots, "codex", readCodexTranscript, 3, context, this.unsupportedSuffixes);
     },
+  },
+  {
+    id: "copilot",
+    label: "GitHub Copilot CLI",
+    roots: () => {
+      const home = process.env.COPILOT_HOME?.trim() || join(homedir(), ".copilot");
+      return [join(home, "session-state")];
+    },
+    read: (roots, context) => readCopilotStore(roots, "copilot", context),
   },
 ]);
 

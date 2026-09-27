@@ -1,0 +1,7 @@
+id: copilot-fixture
+cwd: /workspace/copilot-fixture
+git_root: /workspace/copilot-fixture
+repository: CosmosMind-ai/RSI-Harness
+branch: main
+created_at: 2026-09-01T12:00:00.000Z
+updated_at: 2026-09-01T12:00:04.000Z
