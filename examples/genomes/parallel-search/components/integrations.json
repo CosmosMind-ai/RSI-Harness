@@ -1,0 +1,31 @@
+{
+  "component_schema_version": "1",
+  "component_id": "integrations",
+  "config": {
+    "mcp": {
+      "servers": [
+        {
+          "name": "parallel",
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-remote@0.14.3",
+            "https://search.parallel.ai/mcp",
+            "--transport",
+            "http-only",
+            "--header",
+            "User-Agent:rsih/0.1.0"
+          ],
+          "tools": [
+            {
+              "name": "web_search"
+            },
+            {
+              "name": "web_fetch"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

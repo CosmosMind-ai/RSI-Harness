@@ -1,0 +1,12 @@
+{
+  "genome_schema_version": "3",
+  "genome_id": "harness:parallel-search",
+  "base": "default",
+  "components": [
+    {
+      "id": "integrations",
+      "source": "./components/integrations.json",
+      "contract": "./contracts/integrations.dev.md"
+    }
+  ]
+}
