@@ -50,6 +50,7 @@ export {
   genomeManifestPath,
   genomeSearchDirectories,
   installGenomeBundle,
+  isPathReference,
   resolveHarnessGenome,
   seedStatus,
   userGenomeDirectory,
