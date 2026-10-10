@@ -4,10 +4,12 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -19,7 +21,8 @@ import { loadHarnessGenomeFile } from "./genome-bundle.ts";
 /** Manifest file name inside a directory-shaped Genome bundle. */
 export const GENOME_MANIFEST_NAME = "genome.json";
 
-function isPathReference(reference) {
+/** Whether a reference is explicitly path-like rather than a bare Genome name. */
+export function isPathReference(reference) {
   return (
     isAbsolute(reference) ||
     reference.startsWith(".") ||
@@ -95,6 +98,9 @@ export function genomeNamesIn(directory) {
     return [];
   }
   for (const entry of entries) {
+    // Replaced bundles are recovery backups, not installable Genomes. Single-file
+    // backups do not end in `.json`, but skipping both shapes keeps `list` honest.
+    if (/\.replaced(?:\.\d+)?$/.test(entry)) continue;
     const path = join(directory, entry);
     if (entry.endsWith(".json") && !isDirectory(path)) {
       found.push({ name: basename(entry, ".json"), bundle: false });
@@ -188,6 +194,23 @@ function manifestGenomeId(manifestPath) {
   }
 }
 
+function nextAvailablePath(path) {
+  let candidate = path;
+  let suffix = 1;
+  while (lstatSync(candidate, { throwIfNoEntry: false })) {
+    candidate = `${path}.${suffix++}`;
+  }
+  return candidate;
+}
+
+function sameRealPath(left, right) {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Copy a built-in Genome into `~/.rsih/genomes` and return the installed
  * manifest.
@@ -202,39 +225,101 @@ export function installGenomeBundle(manifestPath, name, homeDirectory = homedir(
   const source = isBundle ? dirname(manifestPath) : manifestPath;
   const directory = userGenomeDirectory(homeDirectory);
   const target = join(directory, isBundle ? name : `${name}.json`);
-  if (existsSync(target) && realpathSync(source) === realpathSync(target)) {
+  if (existsSync(target) && sameRealPath(source, target)) {
     return {
       path: isBundle ? join(target, GENOME_MANIFEST_NAME) : target,
       replaced: undefined,
+      replacements: [],
     };
   }
   mkdirSync(directory, { recursive: true });
 
-  // `<name>.json` is looked up before `<name>/genome.json`, so installing a
-  // bundle while a single-file copy of the same name sits next to it would have
-  // no effect at all. Move the file aside rather than leave the install a no-op
-  // or delete something the user may have written.
-  let replaced;
-  const shadowing = join(directory, `${name}.json`);
-  if (isBundle && existsSync(shadowing)) {
-    replaced = `${shadowing}.replaced`;
-    let suffix = 1;
-    while (lstatSync(replaced, { throwIfNoEntry: false })) {
-      replaced = `${shadowing}.replaced.${suffix++}`;
-    }
-    renameSync(shadowing, replaced);
+  if (!isBundle) {
+    cpSync(source, target, { recursive: true, force: true });
+    return { path: target, replaced: undefined, replacements: [] };
   }
 
-  cpSync(source, target, { recursive: true, force: true });
-  if (isBundle) {
-    const hash = genomeContentHash(source);
-    if (hash) {
-      writeFileSync(
-        join(target, SEED_MARKER_NAME),
-        `${JSON.stringify({ name, hash, genome_id: manifestGenomeId(manifestPath), source }, null, 2)}\n`,
-        "utf8",
-      );
+  // Build the new bundle away from the live path. A recursive `cpSync` into an
+  // existing directory merges trees, so files removed from the seed survive and
+  // poison the next marker comparison.
+  const sourceHash = genomeContentHash(source);
+  if (!sourceHash) throw new Error(`Cannot hash Genome source: ${source}`);
+  const sourceGenomeId = manifestGenomeId(manifestPath);
+  const temporary = mkdtempSync(join(directory, `.${name}.tmp-`));
+  const targetExists = existsSync(target);
+  const targetHash = targetExists ? genomeContentHash(target) : undefined;
+  const marker = targetExists ? readSeedMarker(target) : undefined;
+  const targetIsUnmodified =
+    targetHash === sourceHash ||
+    (targetHash !== undefined &&
+      marker?.hash === targetHash &&
+      marker?.genome_id !== undefined &&
+      marker.genome_id === sourceGenomeId);
+  const shouldBackupTarget = targetExists && !targetIsUnmodified;
+
+  let temporaryTarget;
+  let shadowingBackup;
+  let replaced;
+  const replacements = [];
+  let installed = false;
+  try {
+    cpSync(source, temporary, { recursive: true, force: true });
+    writeFileSync(
+      join(temporary, SEED_MARKER_NAME),
+      `${JSON.stringify({ name, hash: sourceHash, genome_id: sourceGenomeId, source }, null, 2)}\n`,
+      "utf8",
+    );
+
+    // `<name>.json` is looked up before `<name>/genome.json`; preserve a legacy
+    // single-file copy rather than allowing it to make the bundle install a
+    // silent no-op.
+    const shadowing = join(directory, `${name}.json`);
+    if (existsSync(shadowing)) {
+      shadowingBackup = nextAvailablePath(`${shadowing}.replaced`);
+      renameSync(shadowing, shadowingBackup);
+      replacements.push(shadowingBackup);
     }
+
+    // Move the old bundle aside even when it will be discarded. This makes the
+    // final rename recoverable if the filesystem rejects the replacement.
+    if (targetExists) {
+      temporaryTarget = nextAvailablePath(`${target}.old`);
+      renameSync(target, temporaryTarget);
+    }
+    renameSync(temporary, target);
+    installed = true;
+
+    if (temporaryTarget) {
+      if (shouldBackupTarget) {
+        replaced = nextAvailablePath(`${target}.replaced`);
+        renameSync(temporaryTarget, replaced);
+        replacements.push(replaced);
+      } else {
+        rmSync(temporaryTarget, { recursive: true, force: true });
+      }
+    }
+    return {
+      path: join(target, GENOME_MANIFEST_NAME),
+      replaced: replaced ?? replacements[0],
+      replacements,
+    };
+  } catch (error) {
+    // Restore the old paths if the swap failed. Cleanup is best effort so the
+    // original error remains the actionable one.
+    try {
+      if (installed && existsSync(target)) rmSync(target, { recursive: true, force: true });
+      if (temporaryTarget && existsSync(temporaryTarget) && !existsSync(target)) {
+        renameSync(temporaryTarget, target);
+      }
+      if (shadowingBackup && existsSync(shadowingBackup) && !existsSync(join(directory, `${name}.json`))) {
+        renameSync(shadowingBackup, join(directory, `${name}.json`));
+      }
+      if (existsSync(temporary)) rmSync(temporary, { recursive: true, force: true });
+    } catch {
+      // Preserve the original failure; the filesystem state is reported by the
+      // caller rather than hiding it behind rollback diagnostics.
+    }
+    throw error;
   }
   return {
     path: isBundle ? join(target, GENOME_MANIFEST_NAME) : target,
@@ -320,18 +405,17 @@ export function resolveHarnessGenome(
     };
   }
 
-  const directPath = resolve(cwd, reference);
-  if (existsSync(directPath)) {
-    const manifest = genomeManifestPath(directPath);
-    if (!existsSync(manifest)) {
-      throw new Error(
-        `Harness Genome directory has no ${GENOME_MANIFEST_NAME}: ${directPath}`,
-      );
-    }
-    return loaded(manifest, reference);
-  }
-
   if (isPathReference(reference)) {
+    const directPath = resolve(cwd, reference);
+    if (existsSync(directPath)) {
+      const manifest = genomeManifestPath(directPath);
+      if (!existsSync(manifest)) {
+        throw new Error(
+          `Harness Genome directory has no ${GENOME_MANIFEST_NAME}: ${directPath}`,
+        );
+      }
+      return loaded(manifest, reference);
+    }
     throw new Error(`Harness Genome does not exist: ${directPath}`);
   }
 

@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { getAgentDir as getPiAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   GENOME_MANIFEST_NAME,
@@ -10,6 +11,7 @@ import {
   genomeNamesIn,
   genomeSearchDirectories,
   installGenomeBundle,
+  isPathReference,
   resolveHarnessGenome,
   seedStatus,
   userGenomeDirectory,
@@ -131,24 +133,29 @@ function validateGenome(reference, cwd, io) {
  */
 /** Say when installing had to move a shadowing single-file Genome aside. */
 function reportReplacedFile(installed, io) {
-  if (!installed.replaced) return;
-  io.log(
-    `Moved the single-file Genome that was shadowing it to ${installed.replaced}`,
-  );
+  const replacements = installed.replacements ?? (installed.replaced ? [installed.replaced] : []);
+  for (const replacement of replacements) {
+    io.log(`Moved the previous Genome copy to ${replacement}`);
+  }
 }
 
-function installGenome(reference, cwd, io) {
-  const builtin = existsSync(resolve(cwd, reference))
-    ? undefined
-    : findBuiltinGenome(reference);
+function installGenome(reference, cwd, io, { homeDirectory = homedir(), packageDirectory } = {}) {
+  const builtin = !isPathReference(reference)
+    ? findBuiltinGenome(reference, { packageDirectory })
+    : undefined;
   if (builtin) {
-    const installed = installGenomeBundle(builtin, reference);
+    const installed = installGenomeBundle(builtin, reference, homeDirectory);
     io.log(`Installed ${reference} to ${dirname(installed.path)}`);
     reportReplacedFile(installed, io);
     return;
   }
 
-  const resolved = resolveHarnessGenome(reference, { cwd, seedBuiltins: false });
+  const resolved = resolveHarnessGenome(reference, {
+    cwd,
+    homeDirectory,
+    packageDirectory,
+    seedBuiltins: false,
+  });
   if (!resolved.path) {
     throw new Error(`Genome "${reference}" has no source file to install.`);
   }
@@ -156,7 +163,7 @@ function installGenome(reference, cwd, io) {
   // reference: `install examples/genomes/paperlab` must install a Genome
   // named paperlab, not one buried under examples/genomes/.
   const name = genomeInstallName(resolved);
-  const installed = installGenomeBundle(resolved.path, name);
+  const installed = installGenomeBundle(resolved.path, name, homeDirectory);
   if (resolve(installed.path) === resolve(resolved.path)) {
     io.log(`${name} is already installed at ${installed.path}`);
     return;
@@ -169,7 +176,10 @@ function installGenome(reference, cwd, io) {
  * Handle `rsih genome ...`. Returns false when argv is not a genome command so
  * the caller falls through to Pi.
  */
-export function runGenomeCommand(argv, { cwd = process.cwd(), io = console } = {}) {
+export function runGenomeCommand(
+  argv,
+  { cwd = process.cwd(), homeDirectory = homedir(), packageDirectory, io = console } = {},
+) {
   if (argv[0] !== "genome") return false;
   const [, command, argument] = argv;
 
@@ -193,7 +203,7 @@ export function runGenomeCommand(argv, { cwd = process.cwd(), io = console } = {
     return true;
   }
   if (command === "install") {
-    installGenome(argument, cwd, io);
+    installGenome(argument, cwd, io, { homeDirectory, packageDirectory });
     return true;
   }
   throw new Error(`Unknown genome command "${command}".\n\n${USAGE}`);

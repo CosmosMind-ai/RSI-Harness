@@ -25,6 +25,7 @@ import {
   genomeContentHash,
   genomeDisplayName,
   installGenomeBundle,
+  isPathReference,
   loadHarnessGenomeFile,
   resolveHarnessGenome,
 } from "../src/index.ts";
@@ -282,6 +283,12 @@ test("a shipped seed that moved on refreshes an untouched copy", () => {
   const options = { cwd, homeDirectory: home, packageDirectory: distribution };
 
   writeShippedSeed(distribution, "fixture", "v1");
+  mkdirSync(join(distribution, "genomes", "fixture", "skills"), { recursive: true });
+  writeFileSync(
+    join(distribution, "genomes", "fixture", "skills", "removed.md"),
+    "old file",
+    "utf8",
+  );
   const first = resolveHarnessGenome("fixture", options);
   assert.equal(first.seeded, true);
   assert.equal(first.genome.append_system_prompt, "v1");
@@ -298,11 +305,29 @@ test("a shipped seed that moved on refreshes an untouched copy", () => {
 
   // A shipped fix has to reach a user who already ran the Genome once --
   // otherwise every improvement is invisible after the first launch.
+  rmSync(join(distribution, "genomes", "fixture", "skills"), {
+    recursive: true,
+    force: true,
+  });
   writeShippedSeed(distribution, "fixture", "v2");
   const refreshed = resolveHarnessGenome("fixture", options);
   assert.equal(refreshed.refreshed, true);
   assert.equal(refreshed.seeded, false);
   assert.equal(refreshed.genome.append_system_prompt, "v2");
+  assert.equal(
+    existsSync(join(home, ".rsih", "genomes", "fixture", "skills", "removed.md")),
+    false,
+    "refresh must remove files deleted from the seed",
+  );
+
+  // A later seed update must still be considered stale. The old merge bug
+  // turned the leftover file into `modified` at this point and stopped all
+  // future automatic refreshes.
+  writeShippedSeed(distribution, "fixture", "v3");
+  const refreshedAgain = resolveHarnessGenome("fixture", options);
+  assert.equal(refreshedAgain.refreshed, true);
+  assert.equal(refreshedAgain.outdated, false);
+  assert.equal(refreshedAgain.genome.append_system_prompt, "v3");
 });
 
 test("a copy the user edited is reported, never overwritten", () => {
@@ -341,10 +366,77 @@ test("a copy the user edited is reported, never overwritten", () => {
   assert.equal(resolved.genome.append_system_prompt, "mine");
 
   // Installing is the explicit way to take the shipped version instead.
-  installGenomeBundle(join(distribution, "genomes", "fixture", GENOME_MANIFEST_NAME), "fixture", home);
+  const installed = installGenomeBundle(
+    join(distribution, "genomes", "fixture", GENOME_MANIFEST_NAME),
+    "fixture",
+    home,
+  );
+  assert.equal(installed.replaced, join(home, ".rsih", "genomes", "fixture.replaced"));
+  assert.equal(
+    JSON.parse(readFileSync(join(installed.replaced, "components", "instructions.json"), "utf8"))
+      .config.append_system_prompt,
+    "mine",
+  );
   const reinstalled = resolveHarnessGenome("fixture", options);
   assert.equal(reinstalled.outdated, false);
   assert.equal(reinstalled.genome.append_system_prompt, "v2");
+});
+
+test("bare Genome names ignore same-named working-directory entries", () => {
+  const home = mkdtempSync(join(tmpdir(), "rsih-name-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "rsih-name-cwd-"));
+  const distribution = mkdtempSync(join(tmpdir(), "rsih-name-dist-"));
+  const options = {
+    cwd,
+    homeDirectory: home,
+    packageDirectory: distribution,
+    seedBuiltins: false,
+  };
+
+  writeShippedSeed(distribution, "fixture", "shipped");
+  // This is a valid Genome-shaped directory, but it is an ordinary project
+  // entry and must not capture the bare name `fixture`.
+  cpSync(bundle, join(cwd, "fixture"), { recursive: true });
+
+  assert.equal(isPathReference("fixture"), false);
+  assert.equal(isPathReference("./fixture"), true);
+  const byName = resolveHarnessGenome("fixture", options);
+  assert.equal(byName.genome.append_system_prompt, "shipped");
+  assert.equal(
+    byName.path,
+    join(distribution, "genomes", "fixture", GENOME_MANIFEST_NAME),
+  );
+
+  const byPath = resolveHarnessGenome("./fixture", options);
+  assert.notEqual(byPath.genome.append_system_prompt, "shipped");
+  assert.equal(byPath.path, join(cwd, "fixture", GENOME_MANIFEST_NAME));
+});
+
+test("genome install treats a bare name as a name even when cwd has a collision", () => {
+  const home = mkdtempSync(join(tmpdir(), "rsih-install-name-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "rsih-install-name-cwd-"));
+  const distribution = mkdtempSync(join(tmpdir(), "rsih-install-name-dist-"));
+  writeShippedSeed(distribution, "fixture", "shipped");
+  mkdirSync(join(cwd, "fixture"), { recursive: true });
+
+  const logs = [];
+  runGenomeCommand(["genome", "install", "fixture"], {
+    cwd,
+    homeDirectory: home,
+    packageDirectory: distribution,
+    io: { log: (line) => logs.push(line) },
+  });
+
+  assert.equal(
+    JSON.parse(
+      readFileSync(
+        join(home, ".rsih", "genomes", "fixture", "components", "instructions.json"),
+        "utf8",
+      ),
+    ).config.append_system_prompt,
+    "shipped",
+  );
+  assert.match(logs.join("\n"), /Installed fixture/);
 });
 
 test("an unmarked copy that already matches the seed raises no warning", () => {
