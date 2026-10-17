@@ -293,7 +293,7 @@ local and are reasserted from the Genome on reload. Auth, models, history and gl
 resource discovery keep their normal locations. Project-level
 `<cwd>/.rsih/settings.json` still outranks the Genome.
 
-Session snapshots include a hash of the resolved Genome. Explicitly adopting an
+Session snapshots include a hash of the resolved Genome. In-app `/resume` restarts the supervised CLI when the selected session has a different frozen Genome; settings snapshots are resolved along the selected session branch. Explicitly adopting an
 edited Genome at the same name/path records a new snapshot, even without a version
 bump; later resumes restore the last adopted configuration. Editing a file alone
 does not silently update an existing session. Old snapshots remain readable.

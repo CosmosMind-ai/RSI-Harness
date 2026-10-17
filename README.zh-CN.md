@@ -297,3 +297,5 @@ npm run sync:contracts # 改过 docs/genome/components/ 之后同步到 bundle
 
 文档索引见 [docs/README.md](docs/README.md)。仓库不包含 benchmark、数据生成、训练
 或评测实现。
+
+通过 TUI 中的 `/resume` 选择其他 Genome 的历史会话时，Supervisor 会在新进程中恢复该会话保存的 Genome，而不是继续使用当前进程的配置。配置快照按活动会话分支读取，避免不同分支之间的配置相互覆盖。

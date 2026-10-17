@@ -105,7 +105,10 @@ export function restartArgv(argv, request) {
     kept.push(argument);
   }
   const session = request.sessionFile ? ["--session", request.sessionFile] : [];
-  return ["--genome", request.reference, ...session, ...kept];
+  // An in-app /resume must load the Genome frozen in the target session,
+  // not a potentially edited Genome at the same path on disk.
+  const genome = request.kind === "resume" ? [] : ["--genome", request.reference];
+  return [...genome, ...session, ...kept];
 }
 
 /**

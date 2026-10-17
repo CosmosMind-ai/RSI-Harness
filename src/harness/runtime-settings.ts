@@ -43,6 +43,7 @@ export function createRuntimeSettings(agentDirectory = getAgentDir()) {
   const directory = resolve(agentDirectory);
   let patch = {};
   let bindings = {};
+  let snapshotSettings = {};
   let stamp = {};
   const managers = new Set();
   const boundKeybindings = new WeakSet();
@@ -79,8 +80,12 @@ export function createRuntimeSettings(agentDirectory = getAgentDir()) {
   return {
     apply(configuration) {
       patch = cloneJson(configuration.settings ?? {});
+      snapshotSettings = cloneJson(configuration.snapshotSettings ?? configuration.settings ?? {});
       bindings = cloneJson(configuration.keybindings ?? {});
       stamp = cloneJson(configuration.stamp ?? {});
+    },
+    snapshot() {
+      return { settings: cloneJson(snapshotSettings), keybindings: cloneJson(bindings) };
     },
     bindKeybindings(manager) {
       if (boundKeybindings.has(manager)) return;
