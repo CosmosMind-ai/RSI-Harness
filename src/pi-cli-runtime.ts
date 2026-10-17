@@ -1208,6 +1208,41 @@ async function createGenomeExtension({
       });
     });
 
+    // /tree changes the active ancestry without opening a new session file.
+    // For branches of the same Genome, reload Pi with that branch's saved
+    // overlay; never silently load a different Genome's argv-only resources.
+    pi.on("session_tree", async (_event, ctx) => {
+      const branch = ctx.sessionManager.getBranch();
+      const branchGenome = latestSessionGenome(branch);
+      if (sessionGenomeChanged(session.current(), branchGenome)) {
+        ctx.ui.notify(
+          "This branch belongs to another Genome; use /switch-genome to adopt it.",
+          "warning",
+        );
+        return;
+      }
+      const snapshot = findLatestSnapshot(branch);
+      if (!snapshot || !sessionNeedsRestore(
+        session.current(), branchGenome, configuration.snapshot(), snapshot,
+      )) return;
+      if (typeof ctx.reload !== "function") {
+        ctx.ui.notify("Reload this session to apply its branch configuration.", "warning");
+        return;
+      }
+      await configuration.flush();
+      configuration.apply({
+        settings: { ...RSIH_BASE_SETTINGS, ...snapshot.settings },
+        snapshotSettings: snapshot.settings,
+        keybindings: snapshot.keybindings,
+        stamp: {
+          genome: session.current().reference,
+          genomeId: session.current().genome.genome_id,
+          rsih: RSIH_VERSION,
+        },
+      });
+      await ctx.reload();
+    });
+
     pi.on("session_start", (_event, ctx) => {
       // The CLI --resume picker selects its session inside Pi, after RSIH has
       // resolved the startup Genome. Unlike /resume it emits no before_switch.
