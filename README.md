@@ -117,7 +117,7 @@ Managing Genomes:
 
 ```bash
 rsih genome list                    # what's installed, what shipped, what's outdated
-rsih genome show paperlab           # resolved Genome + the settings patch it would write (read-only)
+rsih genome show paperlab           # resolved Genome + process-local settings projection (read-only)
 rsih genome validate ./my-genome
 rsih genome install paperlab        # restore the factory version
 ```

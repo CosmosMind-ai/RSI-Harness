@@ -108,7 +108,7 @@ rsih +paperlab           # 加号简写
 
 ```bash
 rsih genome list                    # 装了什么、随发行版附带什么、哪些落后了
-rsih genome show paperlab           # 解析后的 Genome + 将写入的 settings 补丁（只读）
+rsih genome show paperlab           # 解析后的 Genome + 进程内 settings 投影（只读）
 rsih genome validate ./my-genome
 rsih genome install paperlab        # 取回出厂版本
 ```

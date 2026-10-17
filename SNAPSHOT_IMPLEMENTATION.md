@@ -7,6 +7,10 @@
 2. 防止每次启动都误判为配置变化，避免产生大量重复快照
 3. 旧会话没有 hash 时的兼容性处理
 4. 恢复时使用正确的配置（明确指定优先，否则恢复快照）
+5. 快照沿活动会话分支读取，避免其他分支的配置影响当前会话
+
+配置通过进程内覆盖层应用，不写入共享用户设置。项目设置仍优先于 Genome；
+未托管的用户偏好继续正常持久化。
 
 ## 实现的文件
 
@@ -17,16 +21,17 @@
 - **`computeConfigurationHash()`**: 计算配置的稳定 hash
   - 排除不稳定字段（`lastChangelogVersion`, `lastSeenVersion`, `timestamp` 等）
   - 基于 settings、keybindings 和 stamp 生成 hash
-  
+  - RSIH 发行版本作为元数据保存，不参与配置身份比较；旧版 hash 按当前规则重新计算后比较
+
 - **`createConfigurationSnapshot()`**: 创建配置快照对象
   - 包含 hash、settings、keybindings 和 stamp
-  
+
 - **`configurationEquals()`**: 比较两个快照是否相同
-  
+
 - **`extractSnapshotFromEntry()`**: 从会话记录条目中提取快照
-  
+
 - **`findLatestSnapshot()`**: 查找最新的配置快照
-  
+
 - **`shouldSaveSnapshot()`**: 判断是否应该保存新快照
   - 无历史快照且有配置内容时保存
   - 配置 hash 变化时保存
@@ -48,13 +53,13 @@ import {
 #### b. 会话启动时保存快照（session_start 事件）
 ```typescript
 // Save configuration snapshot when it changes
-const projection = projectGenomeSettings(genome);
+const projection = configuration.snapshot();
 const currentSnapshot = createConfigurationSnapshot(
   projection.settings ?? {},
   projection.keybindings ?? {},
   { genome: active.reference, genomeId: genome.genome_id, rsih: RSIH_VERSION }
 );
-const storedSnapshot = findLatestSnapshot(ctx.sessionManager.getEntries());
+const storedSnapshot = findLatestSnapshot(ctx.sessionManager.getBranch());
 if (shouldSaveSnapshot(currentSnapshot, storedSnapshot)) {
   pi.appendEntry("rsih.configuration", currentSnapshot);
 }
@@ -67,7 +72,7 @@ if (shouldSaveSnapshot(currentSnapshot, storedSnapshot)) {
 let effectiveSettings;
 let effectiveKeybindings;
 if (existingSession && !parsed.genome) {
-  const entries = readSessionEntries(existingSession);
+  const entries = sessionBranchEntries(readSessionEntries(existingSession));
   const storedSnapshot = findLatestSnapshot(entries);
   if (storedSnapshot) {
     effectiveSettings = storedSnapshot.settings;
@@ -96,7 +101,7 @@ if (!effectiveSettings) {
 - ✅ 查找最新快照
 - ✅ 判断是否应保存快照
 
-**结果**: 所有 14 个单元测试通过
+**结果**: 16 个单元测试通过，包括 RSIH 版本元数据和旧版 hash 的兼容性测试。
 
 ### 2. 端到端测试：`test/snapshot-e2e.test.ts`
 
@@ -106,13 +111,17 @@ if (!effectiveSettings) {
 - ✅ 修改 Genome 后恢复会话使用快照配置
 - ✅ 不创建重复快照
 
-**结果**: 端到端测试通过 (7222ms)
+**结果**: 端到端测试通过。
 
 ### 3. 集成测试验证
 
-- ✅ `test/session-isolation.test.ts` - 多会话隔离测试通过 (7223ms)
+- ✅ `test/session-isolation.test.ts` - 多会话隔离测试通过
 - ✅ `test/runtime-settings.test.ts` - 运行时设置测试通过
-- ✅ 其他相关测试未受影响
+- ✅ CLI 回归覆盖独立 Genome 目录、共享目录中的项目隔离、fork 配置继承和参数优先级
+
+2026-10-17 的 Windows 完整回归为 219 项测试、216 项通过、3 项失败。
+失败项在修改前也已复现：两个 TUI 测试使用了 POSIX 路径假设，另一个 generated-tool
+测试需要 `/bin/sh`。类型检查和构建通过；不能将这次本地验证描述为完整测试全部通过。
 
 ## 功能验证
 
@@ -168,7 +177,7 @@ rsih --session old-session.jsonl
 
 ### 1. 稳定 Hash 算法
 
-通过排除不稳定字段（时间戳、版本号等），确保：
+通过排除时间戳、RSIH 发行版本等元数据，确保：
 - 相同配置总是产生相同的 hash
 - 只有实质性变化才触发新快照
 
@@ -213,15 +222,15 @@ shouldSaveSnapshot(current, stored):
     如果 current 非空: 保存
     否则: 不保存
   否则:
-    如果 current.hash !== stored.hash: 保存
+    按当前规则重新计算两者的配置 hash，兼容旧版 hash
+    如果重新计算的 hash 不同: 保存
     否则: 不保存
 ```
 
 ## 性能考虑
 
-- Hash 计算基于 JSON 序列化，性能良好
-- 只在会话启动时计算一次
-- 不影响会话运行时性能
+- Hash 计算基于稳定的 JSON 序列化
+- 快照 hash 在会话启动（含重载）时比较，不进入每次模型请求的主路径
 
 ## 后续可能的增强
 
@@ -232,12 +241,12 @@ shouldSaveSnapshot(current, stored):
 
 ## 总结
 
-配置快照功能已完全实现并通过测试，满足所有预期需求：
+已实现并覆盖以下配置快照行为；完整测试结果及已知限制见上文：
 
-✅ 配置变化时记录新副本  
-✅ 防止重复快照  
-✅ 旧会话兼容  
-✅ 恢复时使用快照配置  
-✅ 明确指定优先原则  
+- 配置变化时记录新副本
+- 防止重复快照
+- 旧会话兼容
+- 恢复时使用快照配置
+- 明确指定优先原则
 
 该功能为多会话隔离和配置管理提供了坚实的基础。
