@@ -38,3 +38,11 @@ export function sessionGenomeChanged(current, target) {
     (target.baseDirectory !== undefined && current.baseDirectory !== target.baseDirectory) ||
     contentHash(current.genome) !== contentHash(target.genome);
 }
+
+/** Whether a startup-selected session needs its saved state reloaded in a fresh process. */
+export function sessionNeedsRestore(current, storedGenome, currentSettings, storedSnapshot) {
+  if (sessionGenomeChanged(current, storedGenome)) return true;
+  if (!storedSnapshot) return false;
+  return contentHash({ settings: currentSettings.settings, keybindings: currentSettings.keybindings }) !==
+    contentHash({ settings: storedSnapshot.settings, keybindings: storedSnapshot.keybindings });
+}

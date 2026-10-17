@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConfigurationSnapshot, findLatestSnapshot } from "../src/harness/configuration-snapshot.ts";
-import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged } from "../src/harness/session-configuration.ts";
+import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "../src/harness/session-configuration.ts";
 
 function snapshot(settings) {
   return createConfigurationSnapshot(settings, {}, { genome: "demo", rsih: "0.1.0" });
@@ -50,4 +50,16 @@ test("empty/legacy session without an active tree does not invent a snapshot", (
   assert.deepEqual(sessionBranchEntries([]), []);
   assert.deepEqual(sessionBranchEntries([{ type: "session", id: "header" }]), []);
   assert.deepEqual(sessionBranchEntries([{ type: "message", id: "entry", parentId: null }], null), []);
+});
+
+test("startup --resume reopens a session whose saved Genome or settings differ", () => {
+  const genome = { genome_id: "harness:demo", settings: { steeringMode: "all" } };
+  const current = { reference: "demo", baseDirectory: "/same", genome };
+  const target = { reference: "demo", baseDirectory: "/same", genome };
+  const settings = { settings: { steeringMode: "all" }, keybindings: {} };
+  const saved = snapshot({ steeringMode: "one-at-a-time" });
+  assert.equal(sessionNeedsRestore(current, target, settings, saved), true);
+  assert.equal(sessionNeedsRestore(current, target, settings, snapshot(settings.settings)), false);
+  assert.equal(sessionNeedsRestore(current, { ...target, reference: "other" }, settings, undefined), true);
+  assert.equal(sessionNeedsRestore(current, target, settings, undefined), false);
 });

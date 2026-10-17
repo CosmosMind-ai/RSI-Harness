@@ -59,7 +59,7 @@ import {
 } from "./harness/pi-projection.ts";
 import { createRuntimeSettings } from "./harness/runtime-settings.ts";
 import { withConfigurationFile } from "./harness/settings-layer.ts";
-import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged } from "./harness/session-configuration.ts";
+import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "./harness/session-configuration.ts";
 import {
   createConfigurationSnapshot,
   findLatestSnapshot,
@@ -1066,6 +1066,7 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd, config
 async function createGenomeExtension({
   session,
   configuration,
+  restoreSessionOnStartup,
   profiles,
   maxTurns: cliMaxTurns,
   cliOverridesTools,
@@ -1208,6 +1209,33 @@ async function createGenomeExtension({
     });
 
     pi.on("session_start", (_event, ctx) => {
+      // The CLI --resume picker selects its session inside Pi, after RSIH has
+      // resolved the startup Genome. Unlike /resume it emits no before_switch.
+      // Reopen the selected session with its frozen Genome and settings before
+      // writing new session entries or letting the user continue.
+      if (_event.reason === "startup" && restoreSessionOnStartup) {
+        const branch = ctx.sessionManager.getBranch();
+        const targetGenome = latestSessionGenome(branch);
+        const saved = findLatestSnapshot(branch);
+        if (sessionNeedsRestore(session.current(), targetGenome, configuration.snapshot(), saved)) {
+          const sessionFile = ctx.sessionManager.getSessionFile();
+          if (sessionFile && ctx.mode === "tui" && process.env[SUPERVISED_ENV] === "1") {
+            writeSwitchRequest(getPiAgentDir(), {
+              kind: "resume",
+              reference: targetGenome?.reference ?? targetGenome?.genome?.genome_id ?? session.current().reference,
+              sessionFile,
+              from: session.current().label,
+            });
+            ctx.shutdown();
+            return;
+          }
+          ctx.ui.notify(
+            "The selected session needs its saved Genome/settings. Reopen it with rsih --session <path>.",
+            "warning",
+          );
+          return;
+        }
+      }
       rememberSessionDirectory(cwd, ctx.sessionManager.getSessionFile());
       if (ctx.mode === "tui") {
         const loadedResources = runtimeResourceLabels(pi, genome);
@@ -1568,6 +1596,7 @@ export async function runPiCli(argv) {
     const extensionFactory = await createGenomeExtension({
       session,
       configuration,
+      restoreSessionOnStartup: parsed.genome === undefined,
       profiles: customProfiles,
       maxTurns: parsed.maxTurns,
       cliOverridesTools: hasOption(
