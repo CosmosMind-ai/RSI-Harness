@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConfigurationSnapshot, findLatestSnapshot } from "../src/harness/configuration-snapshot.ts";
-import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "../src/harness/session-configuration.ts";
+import { latestSessionGenome, sessionBranchEntries, sessionForkBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "../src/harness/session-configuration.ts";
 
 function snapshot(settings) {
   return createConfigurationSnapshot(settings, {}, { genome: "demo", rsih: "0.1.0" });
@@ -83,4 +83,33 @@ test("tree preflight detects a different Genome in the target branch", () => {
   assert.equal(sessionGenomeChanged(
     current, latestSessionGenome(sessionBranchEntries(entries, "a2")),
   ), false, "a branch of the active Genome remains navigable");
+});
+
+test("fork and clone preflight use the retained ancestry, including boundary entries", () => {
+  const original = { genome_id: "harness:first", version: 1 };
+  const switched = { genome_id: "harness:second", version: 1 };
+  const entries = [
+    { type: "custom", id: "a", parentId: null, customType: "rsih.genome",
+      data: { reference: "first", genome: original } },
+    { type: "message", id: "a-user", parentId: "a" },
+    { type: "custom", id: "b", parentId: "a-user", customType: "rsih.genome",
+      data: { reference: "second", genome: switched } },
+    { type: "message", id: "b-user", parentId: "b" },
+  ];
+  const activeFirst = { reference: "first", genome: original };
+  const activeSecond = { reference: "second", genome: switched };
+  const beforeSwitch = latestSessionGenome(sessionForkBranchEntries(entries, "b", "before"));
+  const atSwitch = latestSessionGenome(sessionForkBranchEntries(entries, "b", "at"));
+
+  assert.equal(beforeSwitch.reference, "first", "/fork excludes the chosen entry");
+  assert.equal(atSwitch.reference, "second", "/clone retains the chosen entry");
+  assert.equal(sessionGenomeChanged(activeFirst, beforeSwitch), false);
+  assert.equal(sessionGenomeChanged(activeFirst, atSwitch), true);
+  assert.equal(sessionGenomeChanged(
+    activeSecond, latestSessionGenome(sessionForkBranchEntries(entries, "a-user", "before")),
+  ), true, "forking from the older Genome must be rejected");
+  assert.equal(sessionGenomeChanged(
+    activeSecond, latestSessionGenome(sessionForkBranchEntries(entries, "b-user", "before")),
+  ), false, "forking within the active Genome remains allowed");
+  assert.deepEqual(sessionForkBranchEntries(entries, "missing", "before"), []);
 });
