@@ -148,3 +148,41 @@ test("two live CLI sessions keep their Genome settings through reload and switch
   assert.ok(final.messageCount >= 2);
   assert.match(readFileSync(final.sessionFile, "utf8"), /Synthetic persistence check/);
 });
+
+
+test("two concurrent sessions in one workspace keep independent Genome overlays", { timeout: 90000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), "rsih-same-workspace-"));
+  const agent = join(root, "agent");
+  const cwd = join(root, "project");
+  mkdirSync(agent, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  const profiles = join(root, "providers.json");
+  writeFileSync(profiles, JSON.stringify({
+    mock: { kind: "mock", model: "shared-test-model", mock_responses: ["ok"] },
+  }));
+  const makeGenome = (name, mode) => {
+    const path = join(root, name + ".json");
+    writeFileSync(path, JSON.stringify({
+      genome_schema_version: "2", genome_id: "harness:" + name, version: 1,
+      model: { profile: "mock", id: "shared-test-model" },
+      runtime: { steering_mode: mode, follow_up_mode: mode },
+    }));
+    return path;
+  };
+  const a = rpc(cwd, root, agent, makeGenome("a", "all"), profiles);
+  const b = rpc(cwd, root, agent, makeGenome("b", "one-at-a-time"), profiles);
+  t.after(async () => {
+    await Promise.all([a.close(), b.close()]);
+    rmSync(root, { recursive: true, force: true });
+  });
+  const [left, right] = await Promise.all([
+    a.request({ type: "get_state" }),
+    b.request({ type: "get_state" }),
+  ]);
+  assert.equal(left.steeringMode, "all");
+  assert.equal(right.steeringMode, "one-at-a-time");
+  assert.notEqual(left.sessionId, right.sessionId);
+  assert.notEqual(left.sessionFile, right.sessionFile);
+  assert.equal((await a.request({ type: "get_state" })).steeringMode, "all");
+  assert.equal((await b.request({ type: "get_state" })).steeringMode, "one-at-a-time");
+});
