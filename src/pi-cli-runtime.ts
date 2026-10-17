@@ -58,8 +58,8 @@ import {
   projectGenomeSettings,
 } from "./harness/pi-projection.ts";
 import { createRuntimeSettings } from "./harness/runtime-settings.ts";
-import { withConfigurationFile } from "./harness/settings-layer.ts";
-import { latestSessionGenome, sessionBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "./harness/session-configuration.ts";
+import { migrateLegacyManagedConfiguration, withConfigurationFile } from "./harness/settings-layer.ts";
+import { latestSessionGenome, sessionBranchEntries, sessionForkBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "./harness/session-configuration.ts";
 import {
   createConfigurationSnapshot,
   findLatestSnapshot,
@@ -282,15 +282,19 @@ function rememberedSessionDirectories(cwd) {
   }
 }
 
-function rememberSessionDirectory(cwd, sessionFile) {
-  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+function rememberSessionDirectoryPath(cwd, directory) {
   withConfigurationFile(join(getPiAgentDir(), "session-directories.json"), contents => {
     const index = contents === undefined ? {} : JSON.parse(contents);
     const directories = index[cwd] ?? [];
-    if (directories.includes(dirname(sessionFile))) return undefined;
-    index[cwd] = [...directories, dirname(sessionFile)];
+    if (directories.includes(directory)) return undefined;
+    index[cwd] = [...directories, directory];
     return `${JSON.stringify(index, null, 2)}\n`;
   });
+}
+
+function rememberSessionDirectory(cwd, sessionFile) {
+  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+  rememberSessionDirectoryPath(cwd, dirname(sessionFile));
 }
 
 function findSessionFile(args, sessionDirectories, cwd) {
@@ -1208,6 +1212,22 @@ async function createGenomeExtension({
       });
     });
 
+    // /fork keeps the ancestry before its selected entry; /clone includes it.
+    // Refuse to clone a history branch from another frozen Genome into a
+    // process whose argv-only extensions and prompt belong to this Genome.
+    pi.on("session_before_fork", (event, ctx) => {
+      const retained = sessionForkBranchEntries(
+        ctx.sessionManager.getEntries(), event.entryId, event.position,
+      );
+      const forkGenome = latestSessionGenome(retained);
+      if (!sessionGenomeChanged(session.current(), forkGenome)) return;
+      ctx.ui.notify(
+        "This fork belongs to another Genome. Open that Genome's session before forking.",
+        "warning",
+      );
+      return { cancel: true };
+    });
+
     // Prevent /tree from entering a branch whose frozen Genome differs. Pi
     // emits session_tree only after navigation, which is too late to cancel.
     pi.on("session_before_tree", (event, ctx) => {
@@ -1488,6 +1508,13 @@ export async function runPiCli(argv) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
+
+  // Old RSIH builds wrote Genome overlays into shared Pi files. Remove only
+  // their explicitly managed keys, retaining all user preferences. Record a
+  // legacy managed sessionDir before it disappears from the global settings.
+  migrateLegacyManagedConfiguration(getPiAgentDir(), (legacySessionDir) => {
+    rememberSessionDirectoryPath(cwd, resolve(cwd, legacySessionDir));
+  });
 
   // Session storage stays wherever Pi puts it, so `rsih` and `pi` resume the
   // same way. A Genome that wants project-local runs sets its own session dir.
