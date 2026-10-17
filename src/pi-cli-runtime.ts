@@ -1208,6 +1208,22 @@ async function createGenomeExtension({
       });
     });
 
+    // Prevent /tree from entering a branch whose frozen Genome differs. Pi
+    // emits session_tree only after navigation, which is too late to cancel.
+    pi.on("session_before_tree", (event, ctx) => {
+      const targetBranch = sessionBranchEntries(
+        ctx.sessionManager.getEntries(),
+        event.preparation.targetId,
+      );
+      const targetGenome = latestSessionGenome(targetBranch);
+      if (!sessionGenomeChanged(session.current(), targetGenome)) return;
+      ctx.ui.notify(
+        "This branch belongs to another Genome; switch Genomes before navigating to it.",
+        "warning",
+      );
+      return { cancel: true };
+    });
+
     // /tree changes the active ancestry without opening a new session file.
     // For branches of the same Genome, reload Pi with that branch's saved
     // overlay; never silently load a different Genome's argv-only resources.
