@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { contentHash } from "../src/core/json.ts";
 import {
   computeConfigurationHash,
   createConfigurationSnapshot,
@@ -207,4 +208,46 @@ test("shouldSaveSnapshot excludes unstable fields in comparison", () => {
   );
 
   assert.ok(!shouldSaveSnapshot(snapshot1, snapshot2), "unstable fields should not trigger new snapshot");
+});
+
+test("RSIH version metadata is stored but excluded from configuration identity", () => {
+  const old = createConfigurationSnapshot(
+    { steeringMode: "all" },
+    { "app.session.tree": ["ctrl+g"] },
+    { genome: "demo", genomeId: "harness:demo", rsih: "0.1.0" },
+  );
+  const upgraded = createConfigurationSnapshot(
+    { steeringMode: "all" },
+    { "app.session.tree": ["ctrl+g"] },
+    { genome: "demo", genomeId: "harness:demo", rsih: "0.2.0" },
+  );
+  assert.equal(old.stamp.rsih, "0.1.0");
+  assert.equal(upgraded.stamp.rsih, "0.2.0");
+  assert.equal(old.hash, upgraded.hash);
+  assert.ok(configurationEquals(old, upgraded));
+  assert.equal(shouldSaveSnapshot(upgraded, old), false);
+});
+
+test("legacy version-sensitive snapshot hashes are compared by normalized content", () => {
+  const legacy = createConfigurationSnapshot(
+    { steeringMode: "all" }, {},
+    { genome: "demo", genomeId: "harness:demo", rsih: "0.1.0" },
+  );
+  // Hash format before this change included RSIH release metadata.
+  legacy.hash = contentHash({
+    settings: legacy.settings,
+    keybindings: legacy.keybindings,
+    stamp: legacy.stamp,
+  });
+  const upgraded = createConfigurationSnapshot(
+    { steeringMode: "all" }, {},
+    { genome: "demo", genomeId: "harness:demo", rsih: "0.2.0" },
+  );
+  assert.notEqual(legacy.hash, upgraded.hash);
+  assert.ok(configurationEquals(upgraded, legacy));
+  assert.equal(shouldSaveSnapshot(upgraded, legacy), false);
+  assert.equal(shouldSaveSnapshot(
+    createConfigurationSnapshot({ steeringMode: "one-at-a-time" }, {}, upgraded.stamp),
+    legacy,
+  ), true, "real settings changes still create a snapshot");
 });
