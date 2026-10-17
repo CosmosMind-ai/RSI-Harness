@@ -20,31 +20,40 @@ function parseJsonFile(contents) {
   }
 }
 
-/** Use Pi's lock convention for shared preferences; publish complete JSON files. */
-export function withConfigurationFile(path, update) {
-  mkdirSync(dirname(path), { recursive: true });
-  let release;
+function lockConfigurationFile(path) {
   for (let attempt = 0; ; attempt++) {
     try {
-      release = lockfile.lockSync(path, { realpath: false });
-      break;
+      return lockfile.lockSync(path, { realpath: false });
     } catch (error) {
       if (error.code !== "ELOCKED" || attempt === 9) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
+}
+
+/**
+ * Use Pi's lock convention for shared preferences; publish complete JSON files.
+ * Like Pi's own storage, a missing file gets no directory and no lock until
+ * something is written: reading `<cwd>/.rsih/settings.json` must not create `.rsih/`.
+ */
+export function withConfigurationFile(path, update) {
+  let release = existsSync(path) ? lockConfigurationFile(path) : undefined;
   let temporary;
   try {
-    const current = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    const current = release ? readFileSync(path, "utf8") : undefined;
     const next = update(current);
     if (next !== undefined && next !== current) {
+      if (!release) {
+        mkdirSync(dirname(path), { recursive: true });
+        release = lockConfigurationFile(path);
+      }
       temporary = `${path}.${randomUUID()}.tmp`;
       writeFileSync(temporary, next, { encoding: "utf8", mode: 0o600 });
       renameSync(temporary, path);
     }
   } finally {
     if (temporary) rmSync(temporary, { force: true });
-    release();
+    release?.();
   }
 }
 

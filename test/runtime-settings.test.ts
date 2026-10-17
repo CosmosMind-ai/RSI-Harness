@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -81,6 +81,37 @@ test("legacy managed values do not become user defaults, and invalid settings ar
     await manager.flush();
     assert.equal(readFileSync(file, "utf8"), "{broken-json");
   });
+});
+
+test("a project without settings gets no config directory, and a first write still lands", async t => {
+  const { agent, cwd, file } = fixture(t);
+  rmSync(file);
+  const runtime = createRuntimeSettings(agent);
+  runtime.apply({ settings: { steeringMode: "one-at-a-time" } });
+  await runtime.run(async () => {
+    const manager = SettingsManager.create(cwd, agent);
+    assert.equal(manager.getSteeringMode(), "one-at-a-time");
+    manager.setTheme("light");
+    await manager.flush();
+    assert.deepEqual(manager.drainErrors(), []);
+  });
+  assert.equal(existsSync(join(cwd, CONFIG_DIR_NAME)), false);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).theme, "light");
+});
+
+test("an empty settings file reads as no preferences, like Pi", async t => {
+  const { agent, cwd, file } = fixture(t);
+  writeFileSync(file, "");
+  const runtime = createRuntimeSettings(agent);
+  runtime.apply({ settings: { steeringMode: "one-at-a-time" } });
+  await runtime.run(async () => {
+    const manager = SettingsManager.create(cwd, agent);
+    assert.deepEqual(manager.drainErrors(), []);
+    assert.equal(manager.getSteeringMode(), "one-at-a-time");
+    manager.setTheme("light");
+    await manager.flush();
+  });
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { theme: "light" });
 });
 
 test("the CLI factory bridge is restored after errors and leaves other agent directories alone", async t => {

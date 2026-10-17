@@ -1,7 +1,10 @@
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -272,6 +275,24 @@ function sessionId(path) {
   return readSessionEntries(path).find((entry) => entry.type === "session")?.id;
 }
 
+/** The cwd recorded in a session's header line, without reading the whole file. */
+function sessionCwd(path) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, "r");
+    const buffer = Buffer.alloc(64 * 1024);
+    const length = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const header = JSON.parse(buffer.toString("utf8", 0, length).split(/\r?\n/, 1)[0]);
+    return header?.type === "session" && typeof header.cwd === "string" && header.cwd !== ""
+      ? resolve(header.cwd)
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 function rememberedSessionDirectories(cwd) {
   try {
     const index = JSON.parse(readFileSync(join(getPiAgentDir(), "session-directories.json"), "utf8"));
@@ -317,7 +338,11 @@ function findSessionFile(args, sessionDirectories, cwd) {
     );
   }
   if (hasOption(args, "--continue", "-c")) {
+    // Like Pi: any directory but the per-cwd default may be shared between
+    // projects, so only sessions started in this cwd can be continued there.
+    const defaultDirectory = defaultSessionDirectory(cwd);
     return files()
+      .filter((path) => dirname(path) === defaultDirectory || sessionCwd(path) === cwd)
       .map((path) => ({ path, modified: statSync(path).mtimeMs }))
       .sort((left, right) => right.modified - left.modified)[0]?.path;
   }
@@ -1337,8 +1362,13 @@ function piSessionDirectory(cwd, piArgs) {
     process.env.RSIH_CODING_AGENT_SESSION_DIR ??
     settingsSessionDir;
   if (explicit) return resolve(cwd, explicit);
+  return defaultSessionDirectory(cwd);
+}
+
+/** Pi's per-cwd session directory, used when nothing names another one. */
+function defaultSessionDirectory(cwd) {
   const encoded = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-  return join(agentDirectory, "sessions", encoded);
+  return join(getPiAgentDir(), "sessions", encoded);
 }
 
 export async function runPiCli(argv) {

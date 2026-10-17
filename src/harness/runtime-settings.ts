@@ -8,7 +8,8 @@ function object(value) {
 }
 
 function parse(contents) {
-  const value = contents === undefined ? {} : JSON.parse(contents.replace(/^\uFEFF/, ""));
+  // Pi reads an empty settings file as `{}`; so must the overlay.
+  const value = !contents ? {} : JSON.parse(contents.replace(/^\uFEFF/, ""));
   if (!object(value)) throw new Error("Pi settings must contain a JSON object.");
   return value;
 }

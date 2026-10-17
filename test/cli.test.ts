@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -462,6 +463,41 @@ test("a run id keeps one conversation alive across separate invocations", () => 
     1,
     "the Genome is recorded once, not re-stamped every turn",
   );
+});
+
+test("--continue in a shared session directory stays within the current project", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-continue-"));
+  const providers = join(directory, "providers.json");
+  const shared = join(directory, "shared-sessions");
+  const projectA = join(directory, "project-a");
+  const projectB = join(directory, "project-b");
+  mkdirSync(projectA);
+  mkdirSync(projectB);
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "continue-model", mock_responses: ["ok"],
+  } }));
+  const run = (cwd, prompt, ...extra) => {
+    const result = runCli(directory, ["-p", prompt, "--config", providers, "--profile", "mock",
+      "--session-dir", shared, "--cwd", cwd, ...extra]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const sessions = () => readdirSync(shared).map((name) => join(shared, name));
+  const userPrompts = (file) => readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "message" && entry.message.role === "user")
+    .map((entry) => entry.message.content[0].text);
+
+  run(projectA, "A1.");
+  const [sessionA] = sessions();
+  run(projectB, "B1.");
+  const sessionB = sessions().find((file) => file !== sessionA);
+  // Project B's session is the newest file in the shared directory.
+  utimesSync(sessionB, new Date(), new Date(Date.now() + 60_000));
+
+  run(projectA, "A2.", "-c");
+  assert.equal(sessions().length, 2);
+  assert.deepEqual(userPrompts(sessionA), ["A1.", "A2."]);
+  assert.deepEqual(userPrompts(sessionB), ["B1."]);
 });
 
 test("a changed Genome at the same path is recorded and restored, including legacy snapshots", () => {
