@@ -284,13 +284,19 @@ inside the bundle records the seed's content hash:
 | New seed, you edited | **left alone** — a warning plus `rsih genome install <name>` |
 | Same-name Genome from someone else | **left alone** (different `genome_id` → never overwritten) |
 
-**Settings are compiled.** Pi has no API for injecting settings, so keys a Genome
-declares are rewritten into `~/.rsih/settings.json` at every startup; keys it doesn't
-declare (including `theme` and `defaultModel`, which Pi writes itself) pass through
-untouched. Switching Genomes clears keys the previous one managed and the current one
-no longer declares. The managed set is recorded in the file as `$rsih.managedKeys`.
-A project-level `<cwd>/.rsih/settings.json` outranks the Genome — an explicit escape
-hatch.
+**Settings are local to each running process.** A Genome overlays user defaults in
+memory; it never writes its settings or keybindings into the shared user files.
+Concurrent sessions can run different Genomes and reload independently. Switching
+Genomes releases the old overrides and restores user defaults. User edits to
+unmanaged preferences still persist, while edits to Genome-managed settings stay
+local and are reasserted from the Genome on reload. Auth, models, history and global
+resource discovery keep their normal locations. Project-level
+`<cwd>/.rsih/settings.json` still outranks the Genome.
+
+Session snapshots include a hash of the resolved Genome. Explicitly adopting an
+edited Genome at the same name/path records a new snapshot, even without a version
+bump; later resumes restore the last adopted configuration. Editing a file alone
+does not silently update an existing session. Old snapshots remain readable.
 
 **Semantic fields and the escape hatch.** Semantic fields like
 `runtime.steering_mode`, `policies.compaction`, and `model.cycle` project onto the

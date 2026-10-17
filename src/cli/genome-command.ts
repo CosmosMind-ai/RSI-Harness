@@ -106,10 +106,10 @@ function showGenome(reference, cwd, io) {
   io.log("");
   // Show the compiled result, not just the patch: what lands on disk is what
   // the user needs to reason about.
-  io.log(`Managed Pi settings (${join(getPiAgentDir(), "settings.json")}):`);
+  io.log("Managed Pi settings (process-local; user settings.json is not overwritten):");
   io.log(JSON.stringify(projection.settings, null, 2));
   io.log("");
-  io.log(`Managed keybindings (${join(getPiAgentDir(), "keybindings.json")}):`);
+  io.log("Managed keybindings (process-local; user keybindings.json is not overwritten):");
   io.log(JSON.stringify(projection.keybindings, null, 2));
 }
 

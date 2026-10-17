@@ -163,8 +163,8 @@ manifest 固定叫 `genome.json`：
 | 出口 | 内容 |
 | --- | --- |
 | Pi CLI 参数 | `--provider`、`--model`、`--system-prompt`、`--extension`、`--use-theme`… |
-| `settings.json` | 语义字段的投影 + `settings` 组件；由编译层写入，只动托管键 |
-| `keybindings.json` | `keybindings` 组件；同样只动托管键 |
+| 进程内 settings 覆盖层 | 语义字段的投影 + `settings` 组件；用户默认值仍从公共文件读取，Genome 托管项不写回 |
+| 进程内 keybindings 覆盖层 | `keybindings` 组件；重载用户快捷键后应用当前 Genome，不修改公共文件 |
 | Extension 运行时 | inline skill/command、scratchpad、generated tools、MCP、`resources_discover`、`before_provider_request`、参数收窄校验 |
 
 显式 CLI 参数一律优先于 Genome。
@@ -183,7 +183,7 @@ manifest 固定叫 `genome.json`：
 | 出口 | 原地切换时 |
 | --- | --- |
 | Extension 运行时 | `ctx.reload()` 会重跑 extension factory 并重建 ExtensionRunner，所以上一个 Genome 注册的 tool / command 整体作废——这正好补上 Pi 没有 `unregisterTool` 这件事 |
-| `settings.json` / `keybindings.json` | reload 会重读；托管键的释放逻辑本来就按「换 Genome 不留残留」设计 |
+| settings / keybindings 覆盖层 | reload 重读公共默认值后，重新应用当前进程的 Genome；切换时释放旧覆盖项 |
 | `resources_discover` | reload 时以 `reason: "reload"` 再触发一次，skill 路径先重置再合并，旧 Genome 的 skill 不会累积 |
 | Pi CLI 参数 | **冻结在启动时**。`--system-prompt` / `--append-system-prompt` 通过每轮的 `before_agent_start` 覆盖来补偿；`--extension`、`--no-*` 隔离开关、`--no-themes` 原地换不了，会如实报告 |
 

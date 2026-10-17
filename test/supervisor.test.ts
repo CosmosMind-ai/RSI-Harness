@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   SUPERVISED_ENV,
   SWITCHED_FROM_ENV,
+  SWITCH_REQUEST_ID_ENV,
   restartArgv,
   supervise,
   takeSwitchRequest,
@@ -91,7 +92,7 @@ function scriptedSpawn(script, calls) {
     child.exitCode = null;
     child.kill = () => {};
     setImmediate(() => {
-      step?.before?.();
+      step?.before?.(options);
       child.exitCode = step?.code ?? 0;
       child.emit("exit", step?.code ?? 0, step?.signal ?? null);
     });
@@ -112,12 +113,12 @@ test("the supervisor restarts on a request and stops when there is none", async 
       spawnChild: scriptedSpawn(
         [
           {
-            before: () =>
+            before: ({ env }) =>
               writeSwitchRequest(directory, {
                 reference: "debate",
                 sessionFile: "/s/a.jsonl",
                 from: "dev",
-              }),
+              }, env[SWITCH_REQUEST_ID_ENV]),
           },
           { code: 0 },
         ],
@@ -143,6 +144,30 @@ test("the supervisor restarts on a request and stops when there is none", async 
     assert.equal(calls[1].env[SWITCHED_FROM_ENV], "dev");
     // The user's environment reaches the child untouched.
     assert.equal(calls[1].env.HOME, "/home/u");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisors sharing an agent directory consume only their own switch requests", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-sup-parallel-"));
+  try {
+    const a = [];
+    const b = [];
+    const launch = (name, calls) => supervise({
+      command: "rsih", baseArgs: [], argv: ["--genome", name], agentDirectory: directory, env: {},
+      spawnChild: scriptedSpawn([
+        { before: ({ env }) => writeSwitchRequest(directory,
+          { reference: `${name}-next`, sessionFile: `/sessions/${name}.jsonl` }, env[SWITCH_REQUEST_ID_ENV]) },
+        { code: 0 },
+      ], calls),
+    });
+    assert.deepEqual(await Promise.all([launch("a", a), launch("b", b)]), [0, 0]);
+    assert.notEqual(a[0].env[SWITCH_REQUEST_ID_ENV], b[0].env[SWITCH_REQUEST_ID_ENV]);
+    assert.equal(a[1].args[1], "a-next");
+    assert.equal(b[1].args[1], "b-next");
+    assert.ok(a[1].args.includes("/sessions/a.jsonl"));
+    assert.ok(b[1].args.includes("/sessions/b.jsonl"));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -174,8 +199,8 @@ test("a request left by a crash is honoured, but a restart storm is not", async 
     const stderr = { write: (text) => written.push(text) };
     let clock = 0;
     const calls = [];
-    const file = () =>
-      writeSwitchRequest(directory, { reference: "loop", sessionFile: "/s.jsonl" });
+    const file = ({ env }) =>
+      writeSwitchRequest(directory, { reference: "loop", sessionFile: "/s.jsonl" }, env[SWITCH_REQUEST_ID_ENV]);
     const code = await supervise({
       command: "rsih",
       baseArgs: [],

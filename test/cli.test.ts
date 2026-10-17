@@ -464,6 +464,77 @@ test("a run id keeps one conversation alive across separate invocations", () => 
   );
 });
 
+test("a changed Genome at the same path is recorded and restored, including legacy snapshots", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-snapshot-"));
+  const providers = join(directory, "providers.json");
+  const manifest = join(directory, "genome.json");
+  const observed = join(directory, "observed-prompt.txt");
+  const observer = join(directory, "observer.ts");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "snapshot-model", mock_responses: ["ok"],
+  } }));
+  writeFileSync(observer, `import { writeFileSync } from "node:fs";
+export default function(pi) {
+  pi.on("before_agent_start", event => { writeFileSync(${JSON.stringify(observed)}, event.systemPrompt); });
+}`);
+  const writeGenome = (prompt, version) => writeFileSync(manifest, JSON.stringify(createHarnessGenome({
+    genome_id: "harness:snapshot-test", version,
+    model: { profile: "mock", id: "snapshot-model" }, append_system_prompt: prompt,
+  })));
+  const common = ["-p", "Continue.", "--config", providers, "--extension", observer,
+    "--run-id", "snapshot-test", "--cwd", directory];
+  const run = (explicit) => {
+    const result = runCli(directory, [...common, ...(explicit ? ["--genome", manifest] : [])]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const snapshots = () => sessionEntries(piSessionDir(directory))
+    .filter(entry => entry.type === "custom" && entry.customType === "rsih.genome");
+
+  writeGenome("SNAPSHOT_V1_NPM", 1);
+  run(true);
+  // Old records have no hash. An unchanged explicit reload must not duplicate them.
+  const file = join(piSessionDir(directory), readdirSync(piSessionDir(directory))[0]);
+  const legacy = sessionEntries(piSessionDir(directory));
+  for (const entry of legacy) if (entry.customType === "rsih.genome") delete entry.data.content_hash;
+  writeFileSync(file, legacy.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+  run(true);
+  assert.equal(snapshots().length, 1);
+
+  // Content changes must be detected even when the author leaves version unchanged.
+  writeGenome("SNAPSHOT_V2_PNPM", 1);
+  run(true);
+  assert.equal(snapshots().length, 2);
+  assert.equal(snapshots().at(-1).data.genome.append_system_prompt, "SNAPSHOT_V2_PNPM");
+  assert.match(snapshots().at(-1).data.content_hash, /^[a-f0-9]{64}$/);
+  // A later disk edit is not adopted unless explicitly requested.
+  writeGenome("UNADOPTED_DISK_CHANGE", 2);
+  run(false);
+  assert.match(readFileSync(observed, "utf8"), /SNAPSHOT_V2_PNPM/);
+  assert.doesNotMatch(readFileSync(observed, "utf8"), /SNAPSHOT_V1_NPM|UNADOPTED_DISK_CHANGE/);
+  assert.equal(snapshots().length, 2);
+});
+
+test("a run id restores a Genome's custom session directory without changing global settings", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-sessiondir-"));
+  const manifest = join(directory, "genome.json");
+  const providers = join(directory, "providers.json");
+  const sessions = join(directory, "custom-sessions");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "custom-session-model", mock_responses: ["ok"],
+  } }));
+  writeFileSync(manifest, JSON.stringify(createHarnessGenome({
+    genome_id: "harness:custom-sessiondir", settings: { sessionDir: sessions },
+    model: { profile: "mock", id: "custom-session-model" },
+  })));
+  const args = ["-p", "Continue.", "--config", providers, "--run-id", "custom-directory", "--cwd", directory];
+  const first = runCli(directory, [...args, "--genome", manifest]);
+  assert.equal(first.status, 0, first.stderr);
+  const second = runCli(directory, args);
+  assert.equal(second.status, 0, second.stderr);
+  const entries = sessionEntries(sessions);
+  assert.equal(entries.filter(entry => entry.type === "message" && entry.message.role === "user").length, 2);
+});
+
 test("CLI discovers a named Genome and resumes its Pi session", () => {
   const directory = mkdtempSync(join(tmpdir(), "rsih-cli-genome-"));
   const providersPath = join(directory, "providers.json");

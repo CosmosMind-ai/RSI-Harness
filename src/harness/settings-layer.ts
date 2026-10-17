@@ -1,20 +1,50 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { cloneJson } from "../core/json.ts";
 
 /** Marker key recording which Genome owns which settings in a generated file. */
 export const RSIH_MANAGED_MARKER = "$rsih";
 
-function readJsonFile(path) {
-  if (!existsSync(path)) return {};
+function parseJsonFile(contents) {
+  if (contents === undefined) return {};
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(contents.replace(/^\uFEFF/, ""));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed
       : undefined;
   } catch {
     // A malformed file is Pi's to report; never clobber what we cannot read.
     return undefined;
+  }
+}
+
+/** Use Pi's lock convention for shared preferences; publish complete JSON files. */
+export function withConfigurationFile(path, update) {
+  mkdirSync(dirname(path), { recursive: true });
+  let release;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      release = lockfile.lockSync(path, { realpath: false });
+      break;
+    } catch (error) {
+      if (error.code !== "ELOCKED" || attempt === 9) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  let temporary;
+  try {
+    const current = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    const next = update(current);
+    if (next !== undefined && next !== current) {
+      temporary = `${path}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, next, { encoding: "utf8", mode: 0o600 });
+      renameSync(temporary, path);
+    }
+  } finally {
+    if (temporary) rmSync(temporary, { force: true });
+    release();
   }
 }
 
@@ -52,16 +82,16 @@ export function mergeManagedSettings(existing, patch, stamp) {
  * resolved contents so `rsih genome show` can render them without writing.
  */
 export function compileManagedFile(path, patch, stamp, { write = true } = {}) {
-  const existing = readJsonFile(path);
-  if (existing === undefined) return undefined;
-
-  const next = mergeManagedSettings(existing, patch, stamp);
-  const serialized = `${JSON.stringify(next, null, 2)}\n`;
-  if (write && serialized !== `${JSON.stringify(existing, null, 2)}\n`) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, serialized, "utf8");
-  }
-  return next;
+  let result;
+  const compile = (contents) => {
+    const existing = parseJsonFile(contents);
+    if (existing === undefined) return undefined;
+    result = mergeManagedSettings(existing, patch, stamp);
+    return write ? `${JSON.stringify(result, null, 2)}\n` : undefined;
+  };
+  if (write) withConfigurationFile(path, compile);
+  else compile(existsSync(path) ? readFileSync(path, "utf8") : undefined);
+  return result;
 }
 
 /**

@@ -20,6 +20,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -27,6 +28,7 @@ import { join } from "node:path";
 export const SUPERVISED_ENV = "RSIH_SUPERVISED";
 /** Set on a restarted child so it can tell the user and the model why. */
 export const SWITCHED_FROM_ENV = "RSIH_SWITCHED_FROM";
+export const SWITCH_REQUEST_ID_ENV = "RSIH_SWITCH_REQUEST_ID";
 const REQUEST_FILE = ".switch-genome.json";
 
 /**
@@ -48,22 +50,22 @@ export function wantsInteractive(argv, { stdin = process.stdin, stdout = process
   return true;
 }
 
-function requestPath(agentDirectory) {
-  return join(agentDirectory, REQUEST_FILE);
+function requestPath(agentDirectory, requestId) {
+  return join(agentDirectory, requestId ? `.switch-genome-${requestId}.json` : REQUEST_FILE);
 }
 
 /**
  * Written by the child just before it asks Pi to quit. Synchronous on purpose:
  * Pi's shutdown ends the process, so the write has to be complete first.
  */
-export function writeSwitchRequest(agentDirectory, request) {
+export function writeSwitchRequest(agentDirectory, request, requestId = process.env[SWITCH_REQUEST_ID_ENV]) {
   mkdirSync(agentDirectory, { recursive: true });
-  writeFileSync(requestPath(agentDirectory), `${JSON.stringify(request)}\n`, "utf8");
+  writeFileSync(requestPath(agentDirectory, requestId), `${JSON.stringify(request)}\n`, "utf8");
 }
 
 /** Read and remove the request, so a crash later can never replay it. */
-export function takeSwitchRequest(agentDirectory) {
-  const path = requestPath(agentDirectory);
+export function takeSwitchRequest(agentDirectory, requestId = process.env[SWITCH_REQUEST_ID_ENV]) {
+  const path = requestPath(agentDirectory, requestId);
   if (!existsSync(path)) return undefined;
   let request;
   try {
@@ -131,6 +133,7 @@ export async function supervise({
 }) {
   let currentArgv = argv;
   let switchedFrom;
+  const requestId = randomUUID();
   const recentRestarts = [];
   // Ctrl-C reaches the child directly through the shared terminal; the
   // supervisor's only job on a signal is to stay alive long enough to see the
@@ -140,7 +143,7 @@ export async function supervise({
 
   try {
     for (;;) {
-      const childEnv = { ...env, [SUPERVISED_ENV]: "1" };
+      const childEnv = { ...env, [SUPERVISED_ENV]: "1", [SWITCH_REQUEST_ID_ENV]: requestId };
       if (switchedFrom) childEnv[SWITCHED_FROM_ENV] = switchedFrom;
       else delete childEnv[SWITCHED_FROM_ENV];
 
@@ -165,7 +168,7 @@ export async function supervise({
 
       if (outcome.error) throw outcome.error;
 
-      const request = takeSwitchRequest(agentDirectory);
+      const request = takeSwitchRequest(agentDirectory, requestId);
       if (request && outcome.signal === null) {
         const at = now();
         while (recentRestarts.length > 0 && at - recentRestarts[0] > RESTART_WINDOW_MS) {
@@ -191,6 +194,7 @@ export async function supervise({
       return outcome.code ?? 0;
     }
   } finally {
+    rmSync(requestPath(agentDirectory, requestId), { force: true });
     process.off("SIGINT", ignore);
   }
 }
