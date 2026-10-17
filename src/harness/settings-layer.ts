@@ -95,6 +95,48 @@ export function compileManagedFile(path, patch, stamp, { write = true } = {}) {
 }
 
 /**
+ * Remove projections left on disk by RSIH versions that compiled Genomes into
+ * shared Pi preferences. Only keys explicitly marked as RSIH-managed are
+ * removed; user-owned keys and files without the legacy marker are untouched.
+ *
+ * A legacy Genome may have moved sessions into a custom sessionDir. Register
+ * that directory before removing its override so older runs remain findable.
+ * Safe to call at every startup: after migration the marker is gone.
+ */
+export function migrateLegacyManagedConfiguration(
+  agentDirectory,
+  onLegacySessionDir = () => {},
+) {
+  const migrate = (path, isSettings) => {
+    if (!existsSync(path)) return;
+    withConfigurationFile(path, (contents) => {
+      const existing = parseJsonFile(contents);
+      const managedKeys = existing?.[RSIH_MANAGED_MARKER]?.managedKeys;
+      if (!Array.isArray(managedKeys)) return undefined;
+
+      if (
+        isSettings &&
+        managedKeys.includes("sessionDir") &&
+        typeof existing.sessionDir === "string" &&
+        existing.sessionDir.trim()
+      ) {
+        onLegacySessionDir(existing.sessionDir);
+      }
+
+      const migrated = { ...existing };
+      for (const key of managedKeys) {
+        if (typeof key === "string") delete migrated[key];
+      }
+      delete migrated[RSIH_MANAGED_MARKER];
+      return `${JSON.stringify(migrated, null, 2)}\n`;
+    });
+  };
+
+  migrate(join(agentDirectory, "settings.json"), true);
+  migrate(join(agentDirectory, "keybindings.json"), false);
+}
+
+/**
  * Apply a Genome's `settings` and `keybindings` projection to Pi's agent
  * directory. Pi has no API for injecting settings, so the compiled files are
  * the only place this can land.
