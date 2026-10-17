@@ -49,6 +49,7 @@ import {
   unswitchableDifferences,
 } from "./harness/genome-session.ts";
 import { validateJsonSchema } from "./core/schema.ts";
+import { contentHash } from "./core/json.ts";
 import { createMcpTools } from "./harness/mcp.ts";
 import {
   applyModelOptionsToPayload,
@@ -56,7 +57,13 @@ import {
   projectGenomeResources,
   projectGenomeSettings,
 } from "./harness/pi-projection.ts";
-import { applyManagedConfiguration } from "./harness/settings-layer.ts";
+import { createRuntimeSettings } from "./harness/runtime-settings.ts";
+import { withConfigurationFile } from "./harness/settings-layer.ts";
+import {
+  createConfigurationSnapshot,
+  findLatestSnapshot,
+  shouldSaveSnapshot,
+} from "./harness/configuration-snapshot.ts";
 import { runGenomeCommand } from "./cli/genome-command.ts";
 import {
   SUPERVISED_ENV,
@@ -265,8 +272,29 @@ function sessionId(path) {
   return readSessionEntries(path).find((entry) => entry.type === "session")?.id;
 }
 
-function findSessionFile(args, sessionDirectory, cwd) {
+function rememberedSessionDirectories(cwd) {
+  try {
+    const index = JSON.parse(readFileSync(join(getPiAgentDir(), "session-directories.json"), "utf8"));
+    return (index[cwd] ?? []).filter(directory => typeof directory === "string");
+  } catch {
+    return [];
+  }
+}
+
+function rememberSessionDirectory(cwd, sessionFile) {
+  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+  withConfigurationFile(join(getPiAgentDir(), "session-directories.json"), contents => {
+    const index = contents === undefined ? {} : JSON.parse(contents);
+    const directories = index[cwd] ?? [];
+    if (directories.includes(dirname(sessionFile))) return undefined;
+    index[cwd] = [...directories, dirname(sessionFile)];
+    return `${JSON.stringify(index, null, 2)}\n`;
+  });
+}
+
+function findSessionFile(args, sessionDirectories, cwd) {
   if (hasOption(args, "--no-session", "--resume", "-r")) return undefined;
+  const files = () => [...new Set(sessionDirectories.flatMap(sessionFiles))];
   const requested = optionValue(args, "--session");
   if (requested) {
     if (
@@ -277,19 +305,19 @@ function findSessionFile(args, sessionDirectory, cwd) {
     ) {
       return resolve(cwd, requested);
     }
-    return sessionFiles(sessionDirectory).find((path) => {
+    return files().find((path) => {
       const id = sessionId(path);
       return id === requested || id?.startsWith(requested);
     });
   }
   const exactId = optionValue(args, "--session-id");
   if (exactId) {
-    return sessionFiles(sessionDirectory).find(
+    return files().find(
       (path) => sessionId(path) === exactId,
     );
   }
   if (hasOption(args, "--continue", "-c")) {
-    return sessionFiles(sessionDirectory)
+    return files()
       .map((path) => ({ path, modified: statSync(path).mtimeMs }))
       .sort((left, right) => right.modified - left.modified)[0]?.path;
   }
@@ -914,7 +942,7 @@ function restartAnnouncement(active) {
  * autocomplete list only at startup and reload, so a lazily registered command
  * would dispatch but never complete.
  */
-function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
+function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd, configuration }) {
   pi.registerCommand("switch-genome", {
     description: "Switch the active Genome, keeping the current conversation",
     getArgumentCompletions(prefix) {
@@ -1000,8 +1028,8 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
       // Reproject before reloading: reload is what makes Pi re-read these, and
       // mergeManagedSettings drops keys the previous Genome managed.
       const projection = projectGenomeSettings(next.genome);
-      applyManagedConfiguration({
-        agentDirectory: getPiAgentDir(),
+      await configuration.flush();
+      configuration.apply({
         settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
         keybindings: projection.keybindings,
         stamp: {
@@ -1041,6 +1069,7 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
 
 async function createGenomeExtension({
   session,
+  configuration,
   profiles,
   maxTurns: cliMaxTurns,
   cliOverridesTools,
@@ -1079,7 +1108,7 @@ async function createGenomeExtension({
     registerProfiles(pi, profiles, genome);
     registerInlineResources(pi, genome);
     registerScratchpad(pi, genome);
-    registerGenomeSwitch(pi, { session, profiles, cwd });
+    registerGenomeSwitch(pi, { session, profiles, cwd, configuration });
 
     for (const tool of createGeneratedTools({ cwd, genome })) {
       pi.registerTool({
@@ -1138,6 +1167,7 @@ async function createGenomeExtension({
     });
 
     pi.on("session_start", (_event, ctx) => {
+      rememberSessionDirectory(cwd, ctx.sessionManager.getSessionFile());
       if (ctx.mode === "tui") {
         const loadedResources = runtimeResourceLabels(pi, genome);
         activeResources.skills = loadedResources.skills;
@@ -1152,7 +1182,10 @@ async function createGenomeExtension({
           }),
         );
         ctx.ui.setEditorComponent(
-          (tui, theme, keybindings) => createRsiEditor(tui, theme, keybindings),
+          (tui, theme, keybindings) => {
+            configuration.bindKeybindings(keybindings);
+            return createRsiEditor(tui, theme, keybindings);
+          },
         );
       }
 
@@ -1178,16 +1211,38 @@ async function createGenomeExtension({
             entry.type === "custom" && entry.customType === "rsih.genome",
         )
         .at(-1);
+      const genomeHash = contentHash(genome);
       if (
         prior?.data?.genome_id !== genome.genome_id ||
-        prior?.data?.reference !== active.reference
+        prior?.data?.reference !== active.reference ||
+        prior?.data?.baseDirectory !== active.baseDirectory ||
+        (prior?.data?.content_hash ?? contentHash(prior?.data?.genome ?? null)) !== genomeHash
       ) {
         pi.appendEntry("rsih.genome", {
           reference: active.reference,
           baseDirectory: active.baseDirectory,
           genome_id: genome.genome_id,
+          content_hash: genomeHash,
           genome,
         });
+      }
+
+      // Save configuration snapshot when it changes.
+      // This allows resuming old sessions with their original configuration,
+      // and prevents duplicate snapshots when nothing changed.
+      const projection = projectGenomeSettings(genome);
+      const currentSnapshot = createConfigurationSnapshot(
+        projection.settings ?? {},
+        projection.keybindings ?? {},
+        {
+          genome: active.reference,
+          genomeId: genome.genome_id,
+          rsih: RSIH_VERSION,
+        },
+      );
+      const storedSnapshot = findLatestSnapshot(ctx.sessionManager.getEntries());
+      if (shouldSaveSnapshot(currentSnapshot, storedSnapshot)) {
+        pi.appendEntry("rsih.configuration", currentSnapshot);
       }
 
       if (!cliOverridesTools) {
@@ -1317,7 +1372,9 @@ export async function runPiCli(argv) {
   // Session storage stays wherever Pi puts it, so `rsih` and `pi` resume the
   // same way. A Genome that wants project-local runs sets its own session dir.
   const sessionDirectory = piSessionDirectory(cwd, parsed.piArgs);
-  const existingSession = findSessionFile(parsed.piArgs, sessionDirectory, cwd);
+  const directories = hasOption(parsed.piArgs, "--session-dir") || process.env.RSIH_CODING_AGENT_SESSION_DIR
+    ? [sessionDirectory] : [sessionDirectory, ...rememberedSessionDirectories(cwd)];
+  const existingSession = findSessionFile(parsed.piArgs, directories, cwd);
   const storedGenome =
     parsed.genome === undefined
       ? storedGenomeReference(existingSession)
@@ -1330,128 +1387,163 @@ export async function runPiCli(argv) {
     });
   const { genome } = resolvedGenome;
 
-  // Pi exposes no API for settings or keybindings, so the Genome's projection
-  // is compiled into the files Pi reads. Only Genome-declared keys are touched.
-  const projection = projectGenomeSettings(genome);
-  applyManagedConfiguration({
-    agentDirectory: getPiAgentDir(),
-    settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
-    keybindings: projection.keybindings,
-    stamp: {
-      genome: resolvedGenome.reference,
-      genomeId: genome.genome_id,
-      rsih: RSIH_VERSION,
-    },
-  });
+  // Keep the Genome projection local to this CLI invocation. Pi still reads
+  // auth, model catalogs, session history and discovered resources normally.
+  const configuration = createRuntimeSettings(getPiAgentDir());
+  return configuration.run(async () => {
+    // When resuming a session without explicit --genome, restore the configuration
+    // snapshot from that session if one exists. This ensures old sessions use their
+    // original configuration even if the Genome has been updated since.
+    let effectiveSettings;
+    let effectiveKeybindings;
+    if (existingSession && !parsed.genome) {
+      const entries = readSessionEntries(existingSession);
+      const storedSnapshot = findLatestSnapshot(entries);
+      if (storedSnapshot) {
+        // Use snapshot configuration, preserving the behavior the session was created with
+        effectiveSettings = storedSnapshot.settings;
+        effectiveKeybindings = storedSnapshot.keybindings;
+      }
+    }
 
-  const profiles = parsed.config
-    ? loadProviderProfiles(resolve(cwd, parsed.config))
-    : builtinProviderProfiles();
-  const selectedProfile = parsed.profile ?? genome.model?.profile;
-  const selectedModel =
-    optionValue(parsed.piArgs, "--model") ??
-    genome.model?.id ??
-    (selectedProfile ? profiles[selectedProfile]?.model : undefined);
-  const preserveSessionDefaults = existingSession !== undefined && parsed.genome === undefined;
-  const genomeArgs = [];
+    // Fall back to current Genome projection if no snapshot or explicit --genome given
+    if (!effectiveSettings) {
+      const projection = projectGenomeSettings(genome);
+      effectiveSettings = projection.settings;
+      effectiveKeybindings = projection.keybindings;
+    }
 
-  if (
-    !preserveSessionDefaults &&
-    !hasOption(parsed.piArgs, "--provider") &&
-    selectedProfile
-  ) {
-    genomeArgs.push("--provider", selectedProfile);
-  }
-  if (
-    !preserveSessionDefaults &&
-    !hasOption(parsed.piArgs, "--model") &&
-    selectedModel
-  ) {
-    genomeArgs.push("--model", selectedModel);
-  }
-  // A Genome's instructions are argv-only, so what actually reached Pi has to
-  // be recorded verbatim: `/switch-genome` replaces exactly these strings later.
-  const instructions = genomeInstructions(genome);
-  const startupPrompts = startupPromptRecord({
-    systemPrompt:
-      hasOption(parsed.piArgs, "--system-prompt") ? undefined : instructions.systemPrompt,
-    appendPrompt:
-      hasOption(parsed.piArgs, "--append-system-prompt") ? undefined : instructions.appendPrompt,
-  });
-  // Only replace Pi's own system prompt when the Genome actually declares one.
-  if (startupPrompts.systemPrompt) {
-    genomeArgs.push("--system-prompt", startupPrompts.systemPrompt);
-  }
-  if (startupPrompts.appendPrompt) {
-    genomeArgs.push("--append-system-prompt", startupPrompts.appendPrompt);
-  }
-  // Skills, prompt templates, and themes reach Pi through the
-  // `resources_discover` hook. Extensions have no such hook, so they stay on
-  // argv; explicit `-e` paths keep working even under resource isolation.
-  const baseDirectory = resolve(resolvedGenome.baseDirectory ?? cwd);
-  for (const path of resolveGenomeSources(genome.extensions, baseDirectory)) {
-    genomeArgs.push("--extension", path);
-  }
-  genomeArgs.push(...genomeAppearanceArgs(genome, parsed.piArgs));
-  genomeArgs.push(...genomeResourceIsolationArgs(genome, parsed.piArgs));
-  if (parsed.genome !== undefined) {
-    genomeArgs.push("--genome", parsed.genome);
-  }
+    configuration.apply({
+      settings: { ...RSIH_BASE_SETTINGS, ...effectiveSettings },
+      keybindings: effectiveKeybindings,
+      stamp: {
+        genome: resolvedGenome.reference,
+        genomeId: genome.genome_id,
+        rsih: RSIH_VERSION,
+      },
+    });
 
-  const customProfiles =
-    parsed.config || (selectedProfile && ["gpt", "local"].includes(selectedProfile))
-      ? profiles
-      : {};
-  if (selectedProfile && parsed.config && !profiles[selectedProfile]) {
-    throw new Error(
-      `Provider profile "${selectedProfile}" was not found in ${resolve(cwd, parsed.config)}.`,
+    const profiles = parsed.config
+      ? loadProviderProfiles(resolve(cwd, parsed.config))
+      : builtinProviderProfiles();
+    const selectedProfile = parsed.profile ?? genome.model?.profile;
+    const selectedModel =
+      optionValue(parsed.piArgs, "--model") ??
+      genome.model?.id ??
+      (selectedProfile ? profiles[selectedProfile]?.model : undefined);
+    const preserveSessionDefaults = existingSession !== undefined && parsed.genome === undefined;
+    const genomeArgs = [];
+    if (existingSession && !hasOption(parsed.piArgs, "--session", "--resume", "-r", "--fork")) {
+      const remaining = [];
+      for (let index = 0; index < parsed.piArgs.length; index++) {
+        const argument = parsed.piArgs[index];
+        if (argument === "--session-id") { index++; continue; }
+        if (argument.startsWith("--session-id=") || argument === "--continue" || argument === "-c") continue;
+        remaining.push(argument);
+      }
+      parsed.piArgs = remaining;
+      genomeArgs.push("--session", existingSession);
+    }
+
+    if (
+      !preserveSessionDefaults &&
+      !hasOption(parsed.piArgs, "--provider") &&
+      selectedProfile
+    ) {
+      genomeArgs.push("--provider", selectedProfile);
+    }
+    if (
+      !preserveSessionDefaults &&
+      !hasOption(parsed.piArgs, "--model") &&
+      selectedModel
+    ) {
+      genomeArgs.push("--model", selectedModel);
+    }
+    // A Genome's instructions are argv-only, so what actually reached Pi has to
+    // be recorded verbatim: `/switch-genome` replaces exactly these strings later.
+    const instructions = genomeInstructions(genome);
+    const startupPrompts = startupPromptRecord({
+      systemPrompt:
+        hasOption(parsed.piArgs, "--system-prompt") ? undefined : instructions.systemPrompt,
+      appendPrompt:
+        hasOption(parsed.piArgs, "--append-system-prompt") ? undefined : instructions.appendPrompt,
+    });
+    // Only replace Pi's own system prompt when the Genome actually declares one.
+    if (startupPrompts.systemPrompt) {
+      genomeArgs.push("--system-prompt", startupPrompts.systemPrompt);
+    }
+    if (startupPrompts.appendPrompt) {
+      genomeArgs.push("--append-system-prompt", startupPrompts.appendPrompt);
+    }
+    // Skills, prompt templates, and themes reach Pi through the
+    // `resources_discover` hook. Extensions have no such hook, so they stay on
+    // argv; explicit `-e` paths keep working even under resource isolation.
+    const baseDirectory = resolve(resolvedGenome.baseDirectory ?? cwd);
+    for (const path of resolveGenomeSources(genome.extensions, baseDirectory)) {
+      genomeArgs.push("--extension", path);
+    }
+    genomeArgs.push(...genomeAppearanceArgs(genome, parsed.piArgs));
+    genomeArgs.push(...genomeResourceIsolationArgs(genome, parsed.piArgs));
+    if (parsed.genome !== undefined) {
+      genomeArgs.push("--genome", parsed.genome);
+    }
+
+    const customProfiles =
+      parsed.config || (selectedProfile && ["gpt", "local"].includes(selectedProfile))
+        ? profiles
+        : {};
+    if (selectedProfile && parsed.config && !profiles[selectedProfile]) {
+      throw new Error(
+        `Provider profile "${selectedProfile}" was not found in ${resolve(cwd, parsed.config)}.`,
+      );
+    }
+    if (
+      selectedProfile &&
+      Object.hasOwn(customProfiles, selectedProfile) &&
+      !customProfiles[selectedProfile].model
+    ) {
+      throw new Error(
+        `Provider profile "${selectedProfile}" has no resolved model.`,
+      );
+    }
+
+    // The holder, not the Genome, is what the extension closes over: `ctx.reload()`
+    // re-invokes the factory and the new invocation has to see whatever
+    // `/switch-genome` put here.
+    //
+    // A built-in Genome is copied into ~/.rsih/genomes on first use, so that the
+    // Genome the agent runs -- and reads its skills from -- is always the one in
+    // the user's own directory. Every write, and every refusal to write, is
+    // announced rather than done silently; `genomeActivation` carries that notice.
+    const session = createGenomeSession(
+      genomeActivation(resolvedGenome, {
+        profiles: customProfiles,
+        preserveSessionDefaults,
+      }),
+      startupPrompts,
     );
-  }
-  if (
-    selectedProfile &&
-    Object.hasOwn(customProfiles, selectedProfile) &&
-    !customProfiles[selectedProfile].model
-  ) {
-    throw new Error(
-      `Provider profile "${selectedProfile}" has no resolved model.`,
-    );
-  }
 
-  // The holder, not the Genome, is what the extension closes over: `ctx.reload()`
-  // re-invokes the factory and the new invocation has to see whatever
-  // `/switch-genome` put here.
-  //
-  // A built-in Genome is copied into ~/.rsih/genomes on first use, so that the
-  // Genome the agent runs -- and reads its skills from -- is always the one in
-  // the user's own directory. Every write, and every refusal to write, is
-  // announced rather than done silently; `genomeActivation` carries that notice.
-  const session = createGenomeSession(
-    genomeActivation(resolvedGenome, {
+    const extensionFactory = await createGenomeExtension({
+      session,
+      configuration,
       profiles: customProfiles,
-      preserveSessionDefaults,
-    }),
-    startupPrompts,
-  );
-
-  const extensionFactory = await createGenomeExtension({
-    session,
-    profiles: customProfiles,
-    maxTurns: parsed.maxTurns,
-    cliOverridesTools: hasOption(
-      parsed.piArgs,
-      "--tools",
-      "-t",
-      "--exclude-tools",
-      "-xt",
-      "--no-tools",
-      "-nt",
-      "--no-builtin-tools",
-      "-nbt",
-    ),
-    cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
-    cwd,
-  });
-  await runPiMain([...genomeArgs, ...parsed.piArgs], {
-    extensionFactories: [extensionFactory],
+      maxTurns: parsed.maxTurns,
+      cliOverridesTools: hasOption(
+        parsed.piArgs,
+        "--tools",
+        "-t",
+        "--exclude-tools",
+        "-xt",
+        "--no-tools",
+        "-nt",
+        "--no-builtin-tools",
+        "-nbt",
+      ),
+      cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
+      cwd,
+    });
+    await runPiMain([...genomeArgs, ...parsed.piArgs], {
+      extensionFactories: [extensionFactory],
+    });
   });
 }
