@@ -145,3 +145,24 @@ test("keybindings reload reasserts the current Genome without changing the user'
   assert.deepEqual(manager.getKeys("app.session.tree"), ["ctrl+g"]);
   assert.equal(readFileSync(file, "utf8"), original);
 });
+
+
+test("session snapshot reports the restored Genome projection, not RSIH base settings", t => {
+  const { agent } = fixture(t);
+  const runtime = createRuntimeSettings(agent);
+  runtime.apply({
+    settings: { quietStartup: true, steeringMode: "one-at-a-time" },
+    snapshotSettings: { steeringMode: "one-at-a-time" },
+    keybindings: { "app.session.tree": ["ctrl+t"] },
+  });
+  assert.deepEqual(runtime.snapshot(), {
+    settings: { steeringMode: "one-at-a-time" },
+    keybindings: { "app.session.tree": ["ctrl+t"] },
+  });
+  runtime.apply({
+    settings: { quietStartup: true, steeringMode: "all" },
+    snapshotSettings: { steeringMode: "all" },
+    keybindings: {},
+  });
+  assert.deepEqual(runtime.snapshot(), { settings: { steeringMode: "all" }, keybindings: {} });
+});

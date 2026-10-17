@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   applyManagedConfiguration,
   mergeManagedSettings,
+  migrateLegacyManagedConfiguration,
   RSIH_MANAGED_MARKER,
 } from "../src/harness/settings-layer.ts";
 import { projectGenomeSettings } from "../src/harness/pi-projection.ts";
@@ -183,4 +184,55 @@ test("the checked-in paperlab Genome declares only what it configures", () => {
   // Pi default untouched.
   assert.deepEqual(projection.settings, {});
   assert.deepEqual(projection.keybindings, {});
+});
+
+test("migration removes only legacy RSIH-managed settings and keybindings", t => {
+  const agent = mkdtempSync(join(tmpdir(), "rsih-migrate-"));
+  t.after(() => rmSync(agent, { recursive: true, force: true }));
+  const settingsPath = join(agent, "settings.json");
+  const bindingsPath = join(agent, "keybindings.json");
+  writeFileSync(settingsPath, JSON.stringify({
+    theme: "dark",
+    defaultModel: "preferred",
+    steeringMode: "all",
+    sessionDir: "old-sessions",
+    $rsih: { genome: "legacy", managedKeys: ["steeringMode", "sessionDir"] },
+  }));
+  writeFileSync(bindingsPath, JSON.stringify({
+    "app.session.tree": ["ctrl+g"],
+    "app.quit": ["ctrl+q"],
+    $rsih: { genome: "legacy", managedKeys: ["app.session.tree"] },
+  }));
+
+  const directories = [];
+  migrateLegacyManagedConfiguration(agent, value => directories.push(value));
+  assert.deepEqual(directories, ["old-sessions"]);
+  assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), {
+    theme: "dark", defaultModel: "preferred",
+  });
+  assert.deepEqual(JSON.parse(readFileSync(bindingsPath, "utf8")), {
+    "app.quit": ["ctrl+q"],
+  });
+
+  const settingsAfter = readFileSync(settingsPath, "utf8");
+  const bindingsAfter = readFileSync(bindingsPath, "utf8");
+  migrateLegacyManagedConfiguration(agent, value => directories.push(value));
+  assert.deepEqual(directories, ["old-sessions"], "migration must happen exactly once");
+  assert.equal(readFileSync(settingsPath, "utf8"), settingsAfter);
+  assert.equal(readFileSync(bindingsPath, "utf8"), bindingsAfter);
+});
+
+test("migration leaves ordinary and malformed Pi preferences untouched", t => {
+  const agent = mkdtempSync(join(tmpdir(), "rsih-migrate-"));
+  t.after(() => rmSync(agent, { recursive: true, force: true }));
+  const settingsPath = join(agent, "settings.json");
+  const bindingsPath = join(agent, "keybindings.json");
+  const ordinary = '{ "theme": "light", "steeringMode": "all" }\n';
+  const invalid = "{broken-json";
+  writeFileSync(settingsPath, ordinary);
+  writeFileSync(bindingsPath, invalid);
+
+  migrateLegacyManagedConfiguration(agent);
+  assert.equal(readFileSync(settingsPath, "utf8"), ordinary);
+  assert.equal(readFileSync(bindingsPath, "utf8"), invalid);
 });

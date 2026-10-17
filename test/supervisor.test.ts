@@ -221,3 +221,14 @@ test("a request left by a crash is honoured, but a restart storm is not", async 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test("resume restart loads the target session's frozen Genome instead of passing --genome", () => {
+  const argv = ["--genome", "old", "--resume", "--cwd", "/work"];
+  const restarted = restartArgv(argv, {
+    kind: "resume",
+    reference: "different",
+    sessionFile: "/sessions/selected.jsonl",
+  });
+  assert.deepEqual(restarted, ["--session", "/sessions/selected.jsonl", "--cwd", "/work"]);
+});

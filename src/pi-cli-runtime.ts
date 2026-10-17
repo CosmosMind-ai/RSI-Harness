@@ -61,7 +61,8 @@ import {
   projectGenomeSettings,
 } from "./harness/pi-projection.ts";
 import { createRuntimeSettings } from "./harness/runtime-settings.ts";
-import { withConfigurationFile } from "./harness/settings-layer.ts";
+import { migrateLegacyManagedConfiguration, withConfigurationFile } from "./harness/settings-layer.ts";
+import { latestSessionGenome, sessionBranchEntries, sessionForkBranchEntries, sessionGenomeChanged, sessionNeedsRestore } from "./harness/session-configuration.ts";
 import {
   createConfigurationSnapshot,
   findLatestSnapshot,
@@ -302,15 +303,19 @@ function rememberedSessionDirectories(cwd) {
   }
 }
 
-function rememberSessionDirectory(cwd, sessionFile) {
-  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+function rememberSessionDirectoryPath(cwd, directory) {
   withConfigurationFile(join(getPiAgentDir(), "session-directories.json"), contents => {
     const index = contents === undefined ? {} : JSON.parse(contents);
     const directories = index[cwd] ?? [];
-    if (directories.includes(dirname(sessionFile))) return undefined;
-    index[cwd] = [...directories, dirname(sessionFile)];
+    if (directories.includes(directory)) return undefined;
+    index[cwd] = [...directories, directory];
     return `${JSON.stringify(index, null, 2)}\n`;
   });
+}
+
+function rememberSessionDirectory(cwd, sessionFile) {
+  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+  rememberSessionDirectoryPath(cwd, dirname(sessionFile));
 }
 
 function findSessionFile(args, sessionDirectories, cwd) {
@@ -351,19 +356,13 @@ function findSessionFile(args, sessionDirectories, cwd) {
 
 function storedGenomeReference(sessionFile) {
   if (!sessionFile) return undefined;
-  const entry = readSessionEntries(sessionFile)
-    .filter(
-      (candidate) =>
-        candidate.type === "custom" &&
-        candidate.customType === "rsih.genome",
-    )
-    .at(-1);
-  if (!entry?.data?.genome) return undefined;
+  const record = latestSessionGenome(sessionBranchEntries(readSessionEntries(sessionFile)));
+  if (!record) return undefined;
   return {
-    genome: entry.data.genome,
-    reference: entry.data.reference ?? entry.data.genome.genome_id,
+    genome: record.genome,
+    reference: record.reference ?? record.genome.genome_id,
     path: undefined,
-    baseDirectory: entry.data.baseDirectory,
+    baseDirectory: record.baseDirectory,
   };
 }
 
@@ -1056,6 +1055,7 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd, config
       await configuration.flush();
       configuration.apply({
         settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
+        snapshotSettings: projection.settings,
         keybindings: projection.keybindings,
         stamp: {
           genome: next.reference,
@@ -1095,6 +1095,7 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd, config
 async function createGenomeExtension({
   session,
   configuration,
+  restoreSessionOnStartup,
   profiles,
   maxTurns: cliMaxTurns,
   cliOverridesTools,
@@ -1191,7 +1192,146 @@ async function createGenomeExtension({
       return switched ? { systemPrompt: switched.prompt } : undefined;
     });
 
+    // /resume's target is only known after Pi's session selector. A different
+    // frozen Genome must be opened by the supervisor, not half-applied to a
+    // process whose extensions and isolation flags are already fixed by argv.
+    pi.on("session_before_switch", (event, ctx) => {
+      if (event.reason !== "resume" || !event.targetSessionFile) return;
+      const targetFile = resolve(event.targetSessionFile);
+      const branch = sessionBranchEntries(readSessionEntries(targetFile));
+      const targetGenome = latestSessionGenome(branch);
+      if (!targetGenome) return; // Ordinary Pi/legacy sessions retain Pi's behavior.
+
+      const current = session.current();
+      if (sessionGenomeChanged(current, targetGenome)) {
+        if (ctx.mode === "tui" && process.env[SUPERVISED_ENV] === "1") {
+          writeSwitchRequest(getPiAgentDir(), {
+            kind: "resume",
+            reference: targetGenome.reference ?? targetGenome.genome.genome_id,
+            sessionFile: targetFile,
+            from: current.label,
+          });
+          ctx.shutdown();
+        } else {
+          ctx.ui.notify(
+            "This session uses another Genome. Open it with rsih --session <path> in a separate process.",
+            "warning",
+          );
+        }
+        return { cancel: true };
+      }
+
+      // Same Genome: Pi can switch sessions normally, but each session's
+      // settings/keybindings must be restored before Pi creates the new runtime.
+      const snapshot = findLatestSnapshot(branch);
+      const projected = snapshot ?? projectGenomeSettings(current.genome);
+      configuration.apply({
+        settings: { ...RSIH_BASE_SETTINGS, ...projected.settings },
+        snapshotSettings: projected.settings,
+        keybindings: projected.keybindings,
+        stamp: {
+          genome: current.reference,
+          genomeId: current.genome.genome_id,
+          rsih: RSIH_VERSION,
+        },
+      });
+    });
+
+    // /fork keeps the ancestry before its selected entry; /clone includes it.
+    // Refuse to clone a history branch from another frozen Genome into a
+    // process whose argv-only extensions and prompt belong to this Genome.
+    pi.on("session_before_fork", (event, ctx) => {
+      const retained = sessionForkBranchEntries(
+        ctx.sessionManager.getEntries(), event.entryId, event.position,
+      );
+      const forkGenome = latestSessionGenome(retained);
+      if (!sessionGenomeChanged(session.current(), forkGenome)) return;
+      ctx.ui.notify(
+        "This fork belongs to another Genome. Open that Genome's session before forking.",
+        "warning",
+      );
+      return { cancel: true };
+    });
+
+    // Prevent /tree from entering a branch whose frozen Genome differs. Pi
+    // emits session_tree only after navigation, which is too late to cancel.
+    pi.on("session_before_tree", (event, ctx) => {
+      const targetBranch = sessionBranchEntries(
+        ctx.sessionManager.getEntries(),
+        event.preparation.targetId,
+      );
+      const targetGenome = latestSessionGenome(targetBranch);
+      if (!sessionGenomeChanged(session.current(), targetGenome)) return;
+      ctx.ui.notify(
+        "This branch belongs to another Genome; switch Genomes before navigating to it.",
+        "warning",
+      );
+      return { cancel: true };
+    });
+
+    // /tree changes the active ancestry without opening a new session file.
+    // For branches of the same Genome, reload Pi with that branch's saved
+    // overlay; never silently load a different Genome's argv-only resources.
+    pi.on("session_tree", async (_event, ctx) => {
+      const branch = ctx.sessionManager.getBranch();
+      const branchGenome = latestSessionGenome(branch);
+      if (sessionGenomeChanged(session.current(), branchGenome)) {
+        ctx.ui.notify(
+          "This branch belongs to another Genome; use /switch-genome to adopt it.",
+          "warning",
+        );
+        return;
+      }
+      const snapshot = findLatestSnapshot(branch);
+      if (!snapshot || !sessionNeedsRestore(
+        session.current(), branchGenome, configuration.snapshot(), snapshot,
+      )) return;
+      if (typeof ctx.reload !== "function") {
+        ctx.ui.notify("Reload this session to apply its branch configuration.", "warning");
+        return;
+      }
+      await configuration.flush();
+      configuration.apply({
+        settings: { ...RSIH_BASE_SETTINGS, ...snapshot.settings },
+        snapshotSettings: snapshot.settings,
+        keybindings: snapshot.keybindings,
+        stamp: {
+          genome: session.current().reference,
+          genomeId: session.current().genome.genome_id,
+          rsih: RSIH_VERSION,
+        },
+      });
+      await ctx.reload();
+    });
+
     pi.on("session_start", (_event, ctx) => {
+      // The CLI --resume picker selects its session inside Pi, after RSIH has
+      // resolved the startup Genome. Unlike /resume it emits no before_switch.
+      // Reopen the selected session with its frozen Genome and settings before
+      // writing new session entries or letting the user continue.
+      if (_event.reason === "startup" && restoreSessionOnStartup) {
+        const branch = ctx.sessionManager.getBranch();
+        const targetGenome = latestSessionGenome(branch);
+        const saved = findLatestSnapshot(branch);
+        if (sessionNeedsRestore(session.current(), targetGenome, configuration.snapshot(), saved)) {
+          const sessionFile = ctx.sessionManager.getSessionFile();
+          if (sessionFile && ctx.mode === "tui" && process.env[SUPERVISED_ENV] === "1") {
+            writeSwitchRequest(getPiAgentDir(), {
+              kind: "resume",
+              reference: targetGenome?.reference ?? targetGenome?.genome?.genome_id ?? session.current().reference,
+              sessionFile,
+              from: session.current().label,
+            });
+            ctx.shutdown();
+            return;
+          }
+          ctx.ui.notify(
+            "The selected session needs its saved Genome/settings. Reopen it with rsih --session <path>.",
+            "warning",
+          );
+          return;
+        }
+      }
       rememberSessionDirectory(cwd, ctx.sessionManager.getSessionFile());
       if (ctx.mode === "tui") {
         const loadedResources = runtimeResourceLabels(pi, genome);
@@ -1230,7 +1370,7 @@ async function createGenomeExtension({
       if (announcement) reportGenomeSwitch(pi, ctx, announcement);
 
       const prior = ctx.sessionManager
-        .getEntries()
+        .getBranch()
         .filter(
           (entry) =>
             entry.type === "custom" && entry.customType === "rsih.genome",
@@ -1255,7 +1395,7 @@ async function createGenomeExtension({
       // Save configuration snapshot when it changes.
       // This allows resuming old sessions with their original configuration,
       // and prevents duplicate snapshots when nothing changed.
-      const projection = projectGenomeSettings(genome);
+      const projection = configuration.snapshot();
       const currentSnapshot = createConfigurationSnapshot(
         projection.settings ?? {},
         projection.keybindings ?? {},
@@ -1265,7 +1405,7 @@ async function createGenomeExtension({
           rsih: RSIH_VERSION,
         },
       );
-      const storedSnapshot = findLatestSnapshot(ctx.sessionManager.getEntries());
+      const storedSnapshot = findLatestSnapshot(ctx.sessionManager.getBranch());
       if (shouldSaveSnapshot(currentSnapshot, storedSnapshot)) {
         pi.appendEntry("rsih.configuration", currentSnapshot);
       }
@@ -1399,6 +1539,13 @@ export async function runPiCli(argv) {
     }
   }
 
+  // Old RSIH builds wrote Genome overlays into shared Pi files. Remove only
+  // their explicitly managed keys, retaining all user preferences. Record a
+  // legacy managed sessionDir before it disappears from the global settings.
+  migrateLegacyManagedConfiguration(getPiAgentDir(), (legacySessionDir) => {
+    rememberSessionDirectoryPath(cwd, resolve(cwd, legacySessionDir));
+  });
+
   // Session storage stays wherever Pi puts it, so `rsih` and `pi` resume the
   // same way. A Genome that wants project-local runs sets its own session dir.
   const sessionDirectory = piSessionDirectory(cwd, parsed.piArgs);
@@ -1427,7 +1574,7 @@ export async function runPiCli(argv) {
     let effectiveSettings;
     let effectiveKeybindings;
     if (existingSession && !parsed.genome) {
-      const entries = readSessionEntries(existingSession);
+      const entries = sessionBranchEntries(readSessionEntries(existingSession));
       const storedSnapshot = findLatestSnapshot(entries);
       if (storedSnapshot) {
         // Use snapshot configuration, preserving the behavior the session was created with
@@ -1445,6 +1592,7 @@ export async function runPiCli(argv) {
 
     configuration.apply({
       settings: { ...RSIH_BASE_SETTINGS, ...effectiveSettings },
+      snapshotSettings: effectiveSettings,
       keybindings: effectiveKeybindings,
       stamp: {
         genome: resolvedGenome.reference,
@@ -1556,6 +1704,7 @@ export async function runPiCli(argv) {
     const extensionFactory = await createGenomeExtension({
       session,
       configuration,
+      restoreSessionOnStartup: parsed.genome === undefined,
       profiles: customProfiles,
       maxTurns: parsed.maxTurns,
       cliOverridesTools: hasOption(
