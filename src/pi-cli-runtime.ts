@@ -1,11 +1,7 @@
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
-  readSync,
-  readdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -25,6 +21,8 @@ import type {
 import {
   getAgentDir as getPiAgentDir,
   main as runPiMain,
+  SessionManager,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
@@ -251,16 +249,6 @@ function resolveGenomeSources(entries, baseDirectory) {
     .map((entry) => resolve(baseDirectory, entry.source));
 }
 
-function sessionFiles(sessionDirectory) {
-  try {
-    return readdirSync(sessionDirectory)
-      .filter((name) => name.endsWith(".jsonl"))
-      .map((name) => join(sessionDirectory, name));
-  } catch {
-    return [];
-  }
-}
-
 function readSessionEntries(path) {
   try {
     return readFileSync(path, "utf8")
@@ -269,28 +257,6 @@ function readSessionEntries(path) {
       .map((line) => JSON.parse(line));
   } catch {
     return [];
-  }
-}
-
-function sessionId(path) {
-  return readSessionEntries(path).find((entry) => entry.type === "session")?.id;
-}
-
-/** The cwd recorded in a session's header line, without reading the whole file. */
-function sessionCwd(path) {
-  let descriptor;
-  try {
-    descriptor = openSync(path, "r");
-    const buffer = Buffer.alloc(64 * 1024);
-    const length = readSync(descriptor, buffer, 0, buffer.length, 0);
-    const header = JSON.parse(buffer.toString("utf8", 0, length).split(/\r?\n/, 1)[0]);
-    return header?.type === "session" && typeof header.cwd === "string" && header.cwd !== ""
-      ? resolve(header.cwd)
-      : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -314,44 +280,48 @@ function rememberSessionDirectoryPath(cwd, directory) {
 }
 
 function rememberSessionDirectory(cwd, sessionFile) {
-  if (!sessionFile || dirname(sessionFile) === piSessionDirectory(cwd, [])) return;
+  if (!sessionFile || dirname(sessionFile) === defaultSessionDirectory(cwd)) return;
   rememberSessionDirectoryPath(cwd, dirname(sessionFile));
 }
 
-function findSessionFile(args, sessionDirectories, cwd) {
+async function findSessionFile(args, sessionDirectories, cwd) {
   if (hasOption(args, "--no-session", "--resume", "-r")) return undefined;
-  const files = () => [...new Set(sessionDirectories.flatMap(sessionFiles))];
-  const requested = optionValue(args, "--session");
-  if (requested) {
-    if (
+  // A CLI fork creates a new file, but inherits the source's frozen Genome.
+  const requested = optionValue(args, "--session") ?? optionValue(args, "--fork");
+  if (requested && (
       isAbsolute(requested) ||
       requested.includes("/") ||
       requested.includes("\\") ||
       requested.endsWith(".jsonl")
-    ) {
-      return resolve(cwd, requested);
-    }
-    return files().find((path) => {
-      const id = sessionId(path);
-      return id === requested || id?.startsWith(requested);
-    });
-  }
+  )) return { path: resolve(cwd, requested), local: false };
   const exactId = optionValue(args, "--session-id");
+  if (!requested && !exactId && !hasOption(args, "--continue", "-c")) return undefined;
+
+  // Use Pi's own cwd filtering and ordering for shared directories too. A run
+  // id is project-scoped, whereas --session/--fork may also name global history.
+  const sessions = (await Promise.all(
+    sessionDirectories.map(directory => SessionManager.list(cwd, directory)),
+  )).flat().sort((left, right) => right.modified.getTime() - left.modified.getTime());
+  if (requested) {
+    const local = sessions.find(session => session.id === requested) ??
+      sessions.find(session => session.id.startsWith(requested));
+    if (local) return { path: local.path, local: true };
+    const customDirectory = sessionDirectories[0] === defaultSessionDirectory(cwd)
+      ? undefined : sessionDirectories[0];
+    const global = await SessionManager.listAll(customDirectory);
+    const match = global.find(session => session.id === requested) ??
+      global.find(session => session.id.startsWith(requested));
+    return match ? { path: match.path, local: false } : undefined;
+  }
   if (exactId) {
-    return files().find(
-      (path) => sessionId(path) === exactId,
-    );
+    const match = sessions.find(session => session.id === exactId);
+    return match ? { path: match.path, local: true } : undefined;
   }
-  if (hasOption(args, "--continue", "-c")) {
-    // Like Pi: any directory but the per-cwd default may be shared between
-    // projects, so only sessions started in this cwd can be continued there.
-    const defaultDirectory = defaultSessionDirectory(cwd);
-    return files()
-      .filter((path) => dirname(path) === defaultDirectory || sessionCwd(path) === cwd)
-      .map((path) => ({ path, modified: statSync(path).mtimeMs }))
-      .sort((left, right) => right.modified - left.modified)[0]?.path;
-  }
-  return undefined;
+  // Pi's --continue follows file mtime, including metadata-only changes. The
+  // public list's modified field instead reflects the latest message time.
+  const recent = sessions.map(session => ({ path: session.path, modified: statSync(session.path).mtimeMs }))
+    .sort((left, right) => right.modified - left.modified)[0];
+  return recent ? { path: recent.path, local: true } : undefined;
 }
 
 function storedGenomeReference(sessionFile) {
@@ -1482,26 +1452,19 @@ async function createGenomeExtension({
  * RSIH only needs it to find the Genome snapshot stored in a resumed session;
  * Pi still owns session creation and layout.
  *
- * This runs before the Genome's settings are compiled, so it reads the settings
- * file as it stands — which is where the run being resumed put its sessions.
+ * Match Pi's effective settings before selecting a session: explicit directory,
+ * project settings, Genome overlay, then user defaults. Merely reading settings
+ * through Pi's public manager does not persist the overlay.
  */
-function piSessionDirectory(cwd, piArgs) {
-  const agentDirectory = getPiAgentDir();
-  const settingsPath = join(agentDirectory, "settings.json");
-  let settingsSessionDir;
-  if (existsSync(settingsPath)) {
-    try {
-      settingsSessionDir = JSON.parse(readFileSync(settingsPath, "utf8"))
-        ?.sessionDir;
-    } catch {
-      // Pi reports malformed settings; fall back to its default layout.
-    }
-  }
+function piSessionDirectory(cwd, piArgs, genomeSettings = {}) {
+  const settings = SettingsManager.create(cwd, getPiAgentDir());
+  settings.applyOverrides({ ...genomeSettings, ...settings.getProjectSettings() });
   const explicit =
     optionValue(piArgs, "--session-dir") ??
-    process.env.RSIH_CODING_AGENT_SESSION_DIR ??
-    settingsSessionDir;
-  if (explicit) return resolve(cwd, explicit);
+    process.env.RSIH_CODING_AGENT_SESSION_DIR;
+  if (explicit !== undefined) settings.applyOverrides({ sessionDir: explicit });
+  const directory = settings.getSessionDir();
+  if (directory) return resolve(cwd, directory);
   return defaultSessionDirectory(cwd);
 }
 
@@ -1548,16 +1511,37 @@ export async function runPiCli(argv) {
 
   // Session storage stays wherever Pi puts it, so `rsih` and `pi` resume the
   // same way. A Genome that wants project-local runs sets its own session dir.
-  const sessionDirectory = piSessionDirectory(cwd, parsed.piArgs);
-  const directories = hasOption(parsed.piArgs, "--session-dir") || process.env.RSIH_CODING_AGENT_SESSION_DIR
+  const explicitGenome = parsed.genome === undefined ? undefined : resolveHarnessGenome(parsed.genome, {
+    cwd,
+    homeDirectory: homedir(),
+  });
+  const sessionDirectory = piSessionDirectory(
+    cwd, parsed.piArgs, explicitGenome ? projectGenomeSettings(explicitGenome.genome).settings : {},
+  );
+  // An explicitly selected Genome/directory must not adopt another Genome's
+  // history just because its remembered session happens to be newer.
+  const directories = explicitGenome || sessionDirectory !== defaultSessionDirectory(cwd) ||
+    hasOption(parsed.piArgs, "--session-dir") || process.env.RSIH_CODING_AGENT_SESSION_DIR
     ? [sessionDirectory] : [sessionDirectory, ...rememberedSessionDirectories(cwd)];
-  const existingSession = findSessionFile(parsed.piArgs, directories, cwd);
+  const selectedSession = await findSessionFile(parsed.piArgs, directories, cwd);
+  const existingSession = selectedSession?.path;
+  const sourceOption = hasOption(parsed.piArgs, "--fork") ? "--fork" : "--session";
+  if (existingSession && (sourceOption === "--fork" || selectedSession.local)) {
+    // Pi must open the exact source we resolved, including remembered custom
+    // directories. Keep --fork and its new target id; retain Pi's confirmation
+    // when --session names an id from another project.
+    for (let index = 0; index < parsed.piArgs.length; index++) {
+      const argument = parsed.piArgs[index];
+      if (argument === sourceOption) parsed.piArgs[++index] = existingSession;
+      else if (argument.startsWith(`${sourceOption}=`)) parsed.piArgs[index] = `${sourceOption}=${existingSession}`;
+    }
+  }
   const storedGenome =
     parsed.genome === undefined
       ? storedGenomeReference(existingSession)
       : undefined;
   const resolvedGenome =
-    storedGenome ??
+    explicitGenome ?? storedGenome ??
     resolveHarnessGenome(parsed.genome, {
       cwd,
       homeDirectory: homedir(),

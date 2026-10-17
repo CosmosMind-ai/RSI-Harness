@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -465,6 +465,112 @@ test("a run id keeps one conversation alive across separate invocations", () => 
   );
 });
 
+test("--fork inherits the source Genome snapshot while creating a separate session", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-fork-"));
+  const providers = join(directory, "providers.json");
+  const manifest = join(directory, "genome.json");
+  const observer = join(directory, "observer.ts");
+  const observed = join(directory, "prompt.txt");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "fork-model", mock_responses: ["ok"],
+  } }));
+  writeFileSync(observer, `import { writeFileSync } from "node:fs";
+export default function(pi) {
+  pi.on("before_agent_start", event => writeFileSync(${JSON.stringify(observed)}, event.systemPrompt));
+}`);
+  const genome = createHarnessGenome({
+    genome_id: "harness:fork-source", append_system_prompt: "FROZEN_FORK_INSTRUCTIONS",
+    model: { profile: "mock", id: "fork-model" },
+    runtime: { steering_mode: "all" },
+  });
+  writeFileSync(manifest, JSON.stringify(genome));
+  const common = ["-p", "Continue.", "--config", providers, "--profile", "mock",
+    "--extension", observer, "--cwd", directory];
+  const archive = join(directory, "archive");
+  const first = runCli(directory, [...common, "--genome", manifest,
+    "--session-dir", archive, "--run-id", "source"]);
+  assert.equal(first.status, 0, first.stderr);
+  const sessions = piSessionDir(directory);
+  const source = join(archive, readdirSync(archive)[0]);
+  const original = readFileSync(source, "utf8");
+  writeFileSync(manifest, JSON.stringify({ ...genome, append_system_prompt: "UNADOPTED_FORK_CHANGE" }));
+
+  const fork = runCli(directory, [...common, "--fork", source, "--run-id", "fork-copy"]);
+  assert.equal(fork.status, 0, fork.stderr);
+  assert.match(readFileSync(observed, "utf8"), /FROZEN_FORK_INSTRUCTIONS/);
+  assert.doesNotMatch(readFileSync(observed, "utf8"), /UNADOPTED_FORK_CHANGE/);
+  assert.equal(readFileSync(source, "utf8"), original, "fork leaves its source unchanged");
+  const copy = readdirSync(sessions).map(name => join(sessions, name)).find(file => file !== source);
+  const entries = readFileSync(copy, "utf8").trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.equal(entries[0].id, "fork-copy");
+  assert.equal(entries.filter(entry => entry.customType === "rsih.genome").length, 1);
+
+  const remembered = runCli(directory, [...common, "--fork", "source", "--run-id", "remembered-fork"]);
+  assert.equal(remembered.status, 0, remembered.stderr);
+  assert.match(readFileSync(observed, "utf8"), /FROZEN_FORK_INSTRUCTIONS/);
+  const resumed = runCli(directory, [...common, "--session", "source"]);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(readFileSync(observed, "utf8"), /FROZEN_FORK_INSTRUCTIONS/);
+
+  const target = join(directory, "target-project");
+  mkdirSync(target);
+  const byId = runCli(directory, [...common, "--cwd", target,
+    "--fork", "fork-copy", "--run-id", "fork-by-id"]);
+  assert.equal(byId.status, 0, byId.stderr);
+  assert.match(readFileSync(observed, "utf8"), /FROZEN_FORK_INSTRUCTIONS/);
+  const targetSessions = join(dirname(sessions), basename(piSessionDir(target)));
+  assert.equal(sessionEntries(targetSessions)[0].id, "fork-by-id");
+
+  const explicit = runCli(directory, [...common, "--fork", source,
+    "--genome", manifest, "--run-id", "explicit-fork"]);
+  assert.equal(explicit.status, 0, explicit.stderr);
+  assert.match(readFileSync(observed, "utf8"), /UNADOPTED_FORK_CHANGE/);
+  const sourceEntries = readFileSync(source, "utf8").trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.equal(sourceEntries.filter(entry => entry.type === "message" && entry.message.role === "user").length, 2,
+    "only the explicit resume appends to the source");
+});
+
+test("an explicit Genome scopes run ids and continue to its session directory", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-genome-dirs-"));
+  const providers = join(directory, "providers.json");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "directory-model", mock_responses: ["ok"],
+  } }));
+  const makeGenome = name => {
+    const path = join(directory, `${name}.json`);
+    const sessions = join(directory, `${name}-sessions`);
+    writeFileSync(path, JSON.stringify(createHarnessGenome({
+      genome_id: `harness:${name}`, settings: { sessionDir: sessions },
+      model: { profile: "mock", id: "directory-model" },
+    })));
+    return { path, sessions };
+  };
+  const a = makeGenome("a");
+  const b = makeGenome("b");
+  const run = (genome, prompt, ...args) => {
+    const result = runCli(directory, ["-p", prompt, "--config", providers,
+      "--genome", genome.path, "--cwd", directory, ...args]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  run(a, "A1.", "--run-id", "same-id");
+  run(b, "B1.", "--run-id", "same-id");
+  assert.equal(sessionEntries(a.sessions).filter(entry => entry.type === "message" && entry.message.role === "user").length, 1);
+  assert.equal(sessionEntries(b.sessions).filter(entry => entry.type === "message" && entry.message.role === "user").length, 1);
+  run(a, "A2.", "-c");
+  const prompts = sessions => sessionEntries(sessions)
+    .filter(entry => entry.type === "message" && entry.message.role === "user")
+    .map(entry => entry.message.content[0].text);
+  assert.deepEqual(prompts(a.sessions), ["A1.", "A2."]);
+  assert.deepEqual(prompts(b.sessions), ["B1."]);
+
+  mkdirSync(join(directory, ".rsih"));
+  writeFileSync(join(directory, ".rsih", "settings.json"), JSON.stringify({ sessionDir: b.sessions }));
+  run(a, "B2.", "-c");
+  run(a, "A3.", "-c", "--session-dir", a.sessions);
+  assert.deepEqual(prompts(a.sessions), ["A1.", "A2.", "A3."]);
+  assert.deepEqual(prompts(b.sessions), ["B1.", "B2."]);
+});
+
 test("--continue in a shared session directory stays within the current project", () => {
   const directory = mkdtempSync(join(tmpdir(), "rsih-cli-continue-"));
   const providers = join(directory, "providers.json");
@@ -498,6 +604,58 @@ test("--continue in a shared session directory stays within the current project"
   assert.equal(sessions().length, 2);
   assert.deepEqual(userPrompts(sessionA), ["A1.", "A2."]);
   assert.deepEqual(userPrompts(sessionB), ["B1."]);
+});
+
+test("run ids in a shared session directory stay within the current project", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-shared-runid-"));
+  const providers = join(directory, "providers.json");
+  const shared = join(directory, "sessions");
+  const projectA = join(directory, "project-a");
+  const projectB = join(directory, "project-b");
+  mkdirSync(projectA);
+  mkdirSync(projectB);
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "shared-run-model", mock_responses: ["ok"],
+  } }));
+  const run = (cwd, prompt) => {
+    const result = runCli(directory, ["-p", prompt, "--config", providers, "--profile", "mock",
+      "--session-dir", shared, "--run-id", "daily", "--cwd", cwd]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  run(projectA, "A1.");
+  run(projectB, "B1.");
+  run(projectA, "A2.");
+  const sessions = readdirSync(shared).map(name => readFileSync(join(shared, name), "utf8")
+    .trim().split(/\r?\n/).map(line => JSON.parse(line)));
+  assert.equal(sessions.length, 2);
+  const prompts = cwd => sessions.find(entries => entries[0].cwd === realpathSync(cwd))
+    .filter(entry => entry.type === "message" && entry.message.role === "user")
+    .map(entry => entry.message.content[0].text);
+  assert.deepEqual(prompts(projectA), ["A1.", "A2."]);
+  assert.deepEqual(prompts(projectB), ["B1."]);
+});
+
+test("--continue follows file modification time after session metadata changes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-continue-order-"));
+  const providers = join(directory, "providers.json");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "continue-order-model", mock_responses: ["ok"],
+  } }));
+  const run = (prompt, ...args) => {
+    const result = runCli(directory, ["-p", prompt, "--config", providers, "--profile", "mock",
+      "--cwd", directory, ...args]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  run("Older.", "--run-id", "older");
+  const sessions = piSessionDir(directory);
+  const older = join(sessions, readdirSync(sessions)[0]);
+  run("Newer.", "--run-id", "newer");
+  // Naming or changing settings touches the file without adding a message.
+  utimesSync(older, new Date(), new Date(Date.now() + 60_000));
+  run("Continued.", "-c");
+  const entries = readFileSync(older, "utf8").trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.deepEqual(entries.filter(entry => entry.type === "message" && entry.message.role === "user")
+    .map(entry => entry.message.content[0].text), ["Older.", "Continued."]);
 });
 
 test("a changed Genome at the same path is recorded and restored, including legacy snapshots", () => {

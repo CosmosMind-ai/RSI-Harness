@@ -2,9 +2,10 @@
 
 ## Scope
 
-Owns Pi's `settings.json`. Pi exposes no settings API, so this component is the
-only channel a Genome has to compaction, retry, the model cycle, TUI appearance,
-the shell, proxies, and the rest of that surface.
+Owns the Genome's overlay of Pi's `settings.json` surface: compaction, retry,
+the model cycle, TUI appearance, the shell, proxies, and the rest of that
+surface. The overlay applies to the current process above user defaults and
+below project settings.
 
 ## Config
 
@@ -24,12 +25,13 @@ the shell, proxies, and the rest of that surface.
   overrides the projections of semantic fields such as `runtime.steering_mode`,
   `policies.compaction`, `model.cycle` and `appearance.theme`. Prefer the
   semantic field, and use `settings` only where no semantic field exists.
-- The keys a Genome declares are rewritten into `~/.rsih/settings.json` on every
-  launch. Keys it does not declare are preserved as-is, including the `theme`
-  and `defaultModel` Pi writes itself during a session.
-- When the Genome changes, keys managed by the previous Genome that the current
-  one no longer declares are cleared.
+- The keys a Genome declares are applied in memory on launch and reload;
+  they are not written to shared user settings. Changes to managed settings
+  during a session stay local until reload reasserts the Genome. Unmanaged
+  user preferences continue to persist normally.
+- Switching Genomes releases the previous overlay, so keys the next Genome
+  does not declare return to user defaults.
 - A project-level `<cwd>/.rsih/settings.json` outranks the Genome; it is the
   user's explicit override.
-- After a change, inspect the patch that will be written with
+- After a change, inspect the settings projection with
   `rsih genome show <name>`.

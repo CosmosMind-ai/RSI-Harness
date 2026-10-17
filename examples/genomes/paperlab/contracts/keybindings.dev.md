@@ -24,6 +24,7 @@ shortcuts: editor, selector, session tree, model cycling and the rest.
 - `super` needs a terminal that supports the Kitty keyboard protocol. Do not use
   it in a general-purpose Genome.
 - As with the `settings` component, the ids a Genome declares are re-asserted on
-  every launch, and ids it does not declare keep whatever the user bound by hand.
+  launch and reload in the current process. The shared `keybindings.json` is
+  not changed, and ids the Genome does not declare keep the user's bindings.
 - Shortcuts added by an extension are registered by that extension and are not
   part of this component.
