@@ -535,6 +535,46 @@ test("a run id restores a Genome's custom session directory without changing glo
   assert.equal(entries.filter(entry => entry.type === "message" && entry.message.role === "user").length, 2);
 });
 
+test("legacy managed sessionDir is indexed before shared settings migrate", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-cli-legacy-dir-"));
+  const agent = join(directory, ".rsih-agent");
+  const sessions = join(directory, "legacy-sessions");
+  const genomePath = join(directory, "genome.json");
+  const providers = join(directory, "providers.json");
+  writeFileSync(providers, JSON.stringify({ mock: {
+    kind: "mock", model: "legacy-model", mock_responses: ["ok"],
+  } }));
+  writeFileSync(genomePath, JSON.stringify(createHarnessGenome({
+    genome_id: "harness:legacy-session-dir",
+    model: { profile: "mock", id: "legacy-model" },
+    settings: { sessionDir: sessions },
+  })));
+
+  const common = ["-p", "Continue.", "--config", providers,
+    "--run-id", "legacy-run", "--cwd", directory];
+  const first = runCli(directory, [...common, "--genome", genomePath]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(sessionEntries(sessions).filter(e => e.type === "message" && e.message.role === "user").length, 1);
+
+  // Simulate a previous RSIH release that persisted the Genome's sessionDir
+  // into the user's global Pi settings.
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({
+    theme: "dark",
+    sessionDir: sessions,
+    $rsih: { genome: "legacy", managedKeys: ["sessionDir"] },
+  }));
+  const second = runCli(directory, common);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(sessionEntries(sessions).filter(e => e.type === "message" && e.message.role === "user").length, 2);
+  assert.deepEqual(JSON.parse(readFileSync(join(agent, "settings.json"), "utf8")), {
+    theme: "dark",
+  });
+  assert.ok(JSON.parse(readFileSync(join(agent, "session-directories.json"), "utf8"))[
+    realpathSync(directory)
+  ].includes(sessions), "legacy session directory must stay discoverable");
+});
+
 test("CLI discovers a named Genome and resumes its Pi session", () => {
   const directory = mkdtempSync(join(tmpdir(), "rsih-cli-genome-"));
   const providersPath = join(directory, "providers.json");
