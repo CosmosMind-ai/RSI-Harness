@@ -63,3 +63,24 @@ test("startup --resume reopens a session whose saved Genome or settings differ",
   assert.equal(sessionNeedsRestore(current, { ...target, reference: "other" }, settings, undefined), true);
   assert.equal(sessionNeedsRestore(current, target, settings, undefined), false);
 });
+
+test("tree preflight detects a different Genome in the target branch", () => {
+  const first = { genome_id: "harness:first", version: 1 };
+  const second = { genome_id: "harness:second", version: 1 };
+  const entries = [
+    { type: "custom", id: "root", parentId: null, customType: "rsih.genome",
+      data: { genome: first, reference: "first" } },
+    { type: "message", id: "a1", parentId: "root" },
+    { type: "custom", id: "b1", parentId: "root", customType: "rsih.genome",
+      data: { genome: second, reference: "second" } },
+    { type: "message", id: "b2", parentId: "b1" },
+    { type: "message", id: "a2", parentId: "a1" },
+  ];
+  const current = { genome: first, reference: "first" };
+  assert.equal(sessionGenomeChanged(
+    current, latestSessionGenome(sessionBranchEntries(entries, "b2")),
+  ), true, "navigating to another Genome must be blocked");
+  assert.equal(sessionGenomeChanged(
+    current, latestSessionGenome(sessionBranchEntries(entries, "a2")),
+  ), false, "a branch of the active Genome remains navigable");
+});
