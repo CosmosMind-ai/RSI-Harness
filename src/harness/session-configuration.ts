@@ -24,6 +24,20 @@ export function sessionBranchEntries(entries, leafId) {
   return branch.reverse();
 }
 
+/**
+ * A fork starts immediately before the selected entry; a clone includes it.
+ * Resolve the retained ancestry, rather than reading the whole session file,
+ * so a later Genome on another branch cannot influence the result.
+ */
+export function sessionForkBranchEntries(entries, entryId, position = "before") {
+  const target = entries.find(entry => entry?.id === entryId);
+  if (!target) return [];
+  return sessionBranchEntries(
+    entries,
+    position === "at" ? entryId : (target.parentId ?? null),
+  );
+}
+
 export function latestSessionGenome(entries) {
   return [...entries].reverse().find(
     entry => entry?.type === "custom" &&
