@@ -56,6 +56,9 @@ export function computeConfigurationHash(
     delete stable.stamp[key];
   }
 
+  // RSIH's release version is metadata, not part of the Genome configuration.
+  delete stable.stamp.rsih;
+
   return contentHash(stable);
 }
 
@@ -85,7 +88,9 @@ export function configurationEquals(
   b: ConfigurationSnapshot | undefined,
 ): boolean {
   if (!a || !b) return false;
-  return a.hash === b.hash;
+  // Recompute using current semantics: older stored hashes included stamp.rsih.
+  return computeConfigurationHash(a.settings, a.keybindings, a.stamp) ===
+    computeConfigurationHash(b.settings, b.keybindings, b.stamp);
 }
 
 /**
@@ -161,6 +166,7 @@ export function shouldSaveSnapshot(
     return hasSettings || hasKeybindings || hasStamp;
   }
 
-  // Compare hashes
-  return current.hash !== stored.hash;
+  // Normalize legacy hashes before comparing, avoiding a one-time duplicate
+  // when upgrading from a version that included stamp.rsih in the hash.
+  return !configurationEquals(current, stored);
 }
