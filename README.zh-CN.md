@@ -263,6 +263,10 @@ skill 和 extension 也从那里读。**把一个 Genome 文件夹发给别人�
 记在文件里的 `$rsih.managedKeys`。项目级 `<cwd>/.rsih/settings.json` 优先级高于
 Genome，是显式逃生阀。
 
+会话保存 Genome 的 settings 和 keybindings；resume、fork 和 `/tree` 恢复所选历史中的
+配置。显式 `--genome` 改为采用指定配置；`/restore-configuration` 可重新应用当前分支的
+快照。没有快照的旧会话沿用原有行为。
+
 **语义字段与逃生阀。** `runtime.steering_mode`、`policies.compaction`、`model.cycle`
 这类语义字段会投影成对应的 Pi 设置；`settings` 组件是最低层的原始逃生阀，写在那里
 的值覆盖投影。

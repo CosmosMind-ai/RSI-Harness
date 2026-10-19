@@ -292,6 +292,11 @@ no longer declares. The managed set is recorded in the file as `$rsih.managedKey
 A project-level `<cwd>/.rsih/settings.json` outranks the Genome — an explicit escape
 hatch.
 
+Sessions save the Genome's settings and keybindings. Resume, fork, and `/tree`
+restore the configuration from the selected history; explicit `--genome` adopts
+the specified configuration instead. `/restore-configuration` reapplies the
+snapshot on the current branch. Sessions without snapshots keep existing behavior.
+
 **Semantic fields and the escape hatch.** Semantic fields like
 `runtime.steering_mode`, `policies.compaction`, and `model.cycle` project onto the
 corresponding Pi settings; the `settings` component is the raw escape hatch at the

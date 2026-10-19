@@ -56,7 +56,8 @@ import {
   projectGenomeResources,
   projectGenomeSettings,
 } from "./harness/pi-projection.ts";
-import { applyManagedConfiguration } from "./harness/settings-layer.ts";
+import { findLatestSnapshot, sessionBranchEntries } from "./harness/configuration-snapshot.ts";
+import { createSessionConfiguration } from "./harness/session-configuration.ts";
 import { runGenomeCommand } from "./cli/genome-command.ts";
 import {
   SUPERVISED_ENV,
@@ -267,7 +268,7 @@ function sessionId(path) {
 
 function findSessionFile(args, sessionDirectory, cwd) {
   if (hasOption(args, "--no-session", "--resume", "-r")) return undefined;
-  const requested = optionValue(args, "--session");
+  const requested = optionValue(args, "--session") ?? optionValue(args, "--fork");
   if (requested) {
     if (
       isAbsolute(requested) ||
@@ -275,7 +276,8 @@ function findSessionFile(args, sessionDirectory, cwd) {
       requested.includes("\\") ||
       requested.endsWith(".jsonl")
     ) {
-      return resolve(cwd, requested);
+      return resolve(cwd, requested.startsWith("~/") || requested.startsWith("~\\")
+        ? join(homedir(), requested.slice(2)) : requested);
     }
     return sessionFiles(sessionDirectory).find((path) => {
       const id = sessionId(path);
@@ -298,7 +300,7 @@ function findSessionFile(args, sessionDirectory, cwd) {
 
 function storedGenomeReference(sessionFile) {
   if (!sessionFile) return undefined;
-  const entry = readSessionEntries(sessionFile)
+  const entry = sessionBranchEntries(readSessionEntries(sessionFile))
     .filter(
       (candidate) =>
         candidate.type === "custom" &&
@@ -914,7 +916,7 @@ function restartAnnouncement(active) {
  * autocomplete list only at startup and reload, so a lazily registered command
  * would dispatch but never complete.
  */
-function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
+function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd, configuration }) {
   pi.registerCommand("switch-genome", {
     description: "Switch the active Genome, keeping the current conversation",
     getArgumentCompletions(prefix) {
@@ -1000,15 +1002,10 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
       // Reproject before reloading: reload is what makes Pi re-read these, and
       // mergeManagedSettings drops keys the previous Genome managed.
       const projection = projectGenomeSettings(next.genome);
-      applyManagedConfiguration({
-        agentDirectory: getPiAgentDir(),
-        settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
-        keybindings: projection.keybindings,
-        stamp: {
-          genome: next.reference,
-          genomeId: next.genome.genome_id,
-          rsih: RSIH_VERSION,
-        },
+      configuration.apply(projection, {
+        genome: next.reference,
+        genomeId: next.genome.genome_id,
+        rsih: RSIH_VERSION,
       });
 
       const model = findGenomeModel(ctx.modelRegistry, next.genome.model);
@@ -1041,6 +1038,7 @@ function registerGenomeSwitch(pi: ExtensionAPI, { session, profiles, cwd }) {
 
 async function createGenomeExtension({
   session,
+  configuration,
   profiles,
   maxTurns: cliMaxTurns,
   cliOverridesTools,
@@ -1079,7 +1077,8 @@ async function createGenomeExtension({
     registerProfiles(pi, profiles, genome);
     registerInlineResources(pi, genome);
     registerScratchpad(pi, genome);
-    registerGenomeSwitch(pi, { session, profiles, cwd });
+    registerGenomeSwitch(pi, { session, profiles, cwd, configuration });
+    configuration.bind(pi);
 
     for (const tool of createGeneratedTools({ cwd, genome })) {
       pi.registerTool({
@@ -1137,7 +1136,8 @@ async function createGenomeExtension({
       return switched ? { systemPrompt: switched.prompt } : undefined;
     });
 
-    pi.on("session_start", (_event, ctx) => {
+    pi.on("session_start", async (_event, ctx) => {
+      if (await configuration.start(pi, _event, ctx)) return;
       if (ctx.mode === "tui") {
         const loadedResources = runtimeResourceLabels(pi, genome);
         activeResources.skills = loadedResources.skills;
@@ -1152,7 +1152,10 @@ async function createGenomeExtension({
           }),
         );
         ctx.ui.setEditorComponent(
-          (tui, theme, keybindings) => createRsiEditor(tui, theme, keybindings),
+          (tui, theme, keybindings) => {
+            keybindings.reload();
+            return createRsiEditor(tui, theme, keybindings);
+          },
         );
       }
 
@@ -1172,7 +1175,7 @@ async function createGenomeExtension({
       if (announcement) reportGenomeSwitch(pi, ctx, announcement);
 
       const prior = ctx.sessionManager
-        .getEntries()
+        .getBranch()
         .filter(
           (entry) =>
             entry.type === "custom" && entry.customType === "rsih.genome",
@@ -1189,6 +1192,8 @@ async function createGenomeExtension({
           genome,
         });
       }
+
+      configuration.save(pi, ctx.sessionManager.getBranch());
 
       if (!cliOverridesTools) {
         const activeTools = genomeActiveToolNames(
@@ -1332,17 +1337,22 @@ export async function runPiCli(argv) {
 
   // Pi exposes no API for settings or keybindings, so the Genome's projection
   // is compiled into the files Pi reads. Only Genome-declared keys are touched.
-  const projection = projectGenomeSettings(genome);
-  applyManagedConfiguration({
+  const savedConfiguration = existingSession && parsed.genome === undefined
+    ? findLatestSnapshot(sessionBranchEntries(readSessionEntries(existingSession)))
+    : undefined;
+  const projection = savedConfiguration ?? projectGenomeSettings(genome);
+  const configuration = createSessionConfiguration({
     agentDirectory: getPiAgentDir(),
-    settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
-    keybindings: projection.keybindings,
+    baseSettings: RSIH_BASE_SETTINGS,
+    projection,
     stamp: {
       genome: resolvedGenome.reference,
       genomeId: genome.genome_id,
       rsih: RSIH_VERSION,
     },
+    preferCurrentOnStartup: parsed.genome !== undefined,
   });
+  configuration.apply(projection);
 
   const profiles = parsed.config
     ? loadProviderProfiles(resolve(cwd, parsed.config))
@@ -1435,6 +1445,7 @@ export async function runPiCli(argv) {
 
   const extensionFactory = await createGenomeExtension({
     session,
+    configuration,
     profiles: customProfiles,
     maxTurns: parsed.maxTurns,
     cliOverridesTools: hasOption(
