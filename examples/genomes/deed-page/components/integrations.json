@@ -1,0 +1,34 @@
+{
+  "component_schema_version": "1",
+  "component_id": "integrations",
+  "config": {
+    "mcp": {
+      "servers": [
+        {
+          "name": "deedpage",
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-remote@0.14.3",
+            "https://deed.page/mcp",
+            "--transport",
+            "http-only",
+            "--header",
+            "User-Agent:rsih/0.1.0"
+          ],
+          "tools": [
+            {
+              "name": "publish_site"
+            },
+            {
+              "name": "get_site"
+            },
+            {
+              "name": "delete_site"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

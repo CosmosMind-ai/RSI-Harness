@@ -247,6 +247,7 @@ straight from a clone of this repo.
 | --- | --- |
 | [`paperlab`](examples/genomes/paperlab/) | run paper experiments — scout real datasets and checkpoints, bootstrap a reproducible environment, operate long runs from observed state |
 | [`parallel-search`](examples/genomes/parallel-search/) | opt-in keyless web search and page retrieval through Parallel Search MCP |
+| [`deed-page`](examples/genomes/deed-page/) | opt-in keyless publishing of HTML pages to a public deed.page URL through its MCP endpoint |
 
 ```bash
 rsih genome install examples/genomes/paperlab
