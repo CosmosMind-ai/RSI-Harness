@@ -20,6 +20,7 @@ rsih :paperlab
 | --- | --- |
 | [`paperlab`](../examples/genomes/paperlab/) | run paper experiments — scout real datasets and checkpoints, bootstrap a reproducible environment, operate long runs from observed state |
 | [`parallel-search`](../examples/genomes/parallel-search/) | opt-in keyless web search and page retrieval through Parallel Search MCP |
+| [`keenable-search`](../examples/genomes/keenable-search/) | opt-in keyless web search and page retrieval through Keenable MCP |
 
 ## What a contribution must satisfy
 

@@ -1,0 +1,31 @@
+{
+  "component_schema_version": "1",
+  "component_id": "integrations",
+  "config": {
+    "mcp": {
+      "servers": [
+        {
+          "name": "keenable",
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-remote@0.14.3",
+            "https://api.keenable.ai/mcp-public",
+            "--transport",
+            "http-only",
+            "--header",
+            "X-Keenable-Title:rsih"
+          ],
+          "tools": [
+            {
+              "name": "search_web_pages"
+            },
+            {
+              "name": "fetch_page_content"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
