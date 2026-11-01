@@ -11,6 +11,7 @@ rsih :<name>
 | --- | --- |
 | [`paperlab`](paperlab/) | run paper experiments — scout real datasets and checkpoints, bootstrap a reproducible environment, operate long runs from observed state |
 | [`parallel-search`](parallel-search/) | opt-in keyless web search and page retrieval through Parallel Search MCP |
+| [`keenable-search`](keenable-search/) | opt-in keyless web search and page retrieval through Keenable MCP |
 
 `paperlab` also ships as the built-in seed in
 [`config/genomes/paperlab`](../../config/genomes/paperlab/); the two copies are
