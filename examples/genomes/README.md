@@ -10,6 +10,7 @@ rsih :<name>
 | Genome | What it is |
 | --- | --- |
 | [`paperlab`](paperlab/) | run paper experiments — scout real datasets and checkpoints, bootstrap a reproducible environment, operate long runs from observed state |
+| [`sem-weave`](sem-weave/) | opt-in local code lookup, entity edits and merge previews |
 | [`parallel-search`](parallel-search/) | opt-in keyless web search and page retrieval through Parallel Search MCP |
 
 `paperlab` also ships as the built-in seed in

@@ -1,0 +1,50 @@
+{
+  "component_schema_version": "1",
+  "component_id": "integrations",
+  "config": {
+    "mcp": {
+      "servers": [
+        {
+          "name": "sem",
+          "command": "sem",
+          "args": [
+            "mcp"
+          ],
+          "cwd": ".",
+          "env": {
+            "SEM_REPO": ".",
+            "SEM_LOCAL": "1",
+            "SEM_MCP_NO_SHARED": "1",
+            "SEM_NO_NETWORK": "1",
+            "SEM_NO_TELEMETRY": "1"
+          },
+          "tools": [
+            {
+              "name": "sem_find",
+              "expose_as": "sem_find"
+            }
+          ]
+        },
+        {
+          "name": "weave",
+          "command": "weave-mcp",
+          "args": [],
+          "cwd": ".",
+          "env": {
+            "WEAVE_REPO": "."
+          },
+          "tools": [
+            {
+              "name": "weave_edit",
+              "expose_as": "weave_edit"
+            },
+            {
+              "name": "weave_preview",
+              "expose_as": "weave_preview"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
