@@ -30,7 +30,7 @@ lists the full surface):
 | Option | Meaning |
 | --- | --- |
 | `--genome <name\|path>` | the Genome to run. Shorthands: `rsih :name`, `::name`, `+name` — recognized only as the **first** argument. A bare name resolves against `./.rsih/genomes`, then `~/.rsih/genomes`, then the built-in seeds; a path loads directly |
-| `--profile <name>` | provider profile from `--config`; also sets Pi's `--provider` |
+| `--profile <name>` | provider profile from `--config`, or built-in `gpt` / `local` / `aimlapi`; also sets Pi's `--provider` |
 | `--config <file>` | provider profile JSON (custom model endpoints) |
 | `--env <file>` | env file to load; default `./.env` relative to `--cwd` |
 | `--cwd <dir>` | working directory for the run; also decides where the session lands. Symlinks are resolved, so the stored session path is canonical |
@@ -185,6 +185,11 @@ turn by turn: send a `prompt`, watch events stream back, `steer` mid-turn,
   agent starts — API keys commonly live there.
 - Providers come from built-in catalogs plus any `--config` profile JSON;
   `rsih auth` checks credential readiness, `rsih --list-models` lists models.
+- `--profile aimlapi` runs on [AI/ML API](https://aimlapi.com) through its
+  OpenAI-compatible endpoint `https://api.aimlapi.com/v1`. The key comes from
+  `AIMLAPI_API_KEY`; `AIMLAPI_MODEL` picks any chat model from
+  `https://api.aimlapi.com/v1/models` (default `openai/gpt-6-luna`). The key is
+  only sent to `api.aimlapi.com`, and redirects are not followed.
 - `PI_PACKAGE_DIR` is where RSIH looks for built-in Genome seeds; normally set
   by the launcher itself.
 

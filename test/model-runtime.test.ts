@@ -9,6 +9,11 @@ import {
   ModelRuntime,
   resolveProviderProfile,
 } from "../src/index.ts";
+import {
+  AIMLAPI_DEFAULT_MODEL,
+  builtinProviderProfiles,
+  visibleBuiltinProfiles,
+} from "../src/pi-cli-runtime.ts";
 
 test("extractJson preserves model-generated LaTeX with invalid JSON escapes", () => {
   const value = extractJson(
@@ -779,4 +784,114 @@ test("ModelRuntime retries malformed structured output with feedback", async () 
     requests[0].messages.at(-1).content,
     /prior TestAnswer was invalid/,
   );
+});
+
+function aimlapiRuntime(fetchImpl, environment = { AIMLAPI_API_KEY: "test-aimlapi-key" }) {
+  return new ModelRuntime({
+    profiles: { aimlapi: builtinProviderProfiles(environment).aimlapi },
+    fetchImpl,
+    delayImpl: async () => {},
+  });
+}
+
+function chatCompletion(model) {
+  return new Response(
+    JSON.stringify({
+      id: "chat-aimlapi",
+      model,
+      choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+test("aimlapi profile posts chat completions to api.aimlapi.com with the env key", async () => {
+  const requests = [];
+  const runtime = aimlapiRuntime(async (url, options) => {
+    requests.push({ url, options });
+    return chatCompletion(AIMLAPI_DEFAULT_MODEL);
+  });
+
+  const result = await runtime.generate("aimlapi", {
+    messages: [{ role: "user", content: "Say ok." }],
+  });
+
+  assert.equal(result.text, "ok");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://api.aimlapi.com/v1/chat/completions");
+  assert.equal(requests[0].options.headers.authorization, "Bearer test-aimlapi-key");
+  assert.equal(requests[0].options.redirect, "manual");
+  const body = JSON.parse(requests[0].options.body);
+  assert.equal(body.model, AIMLAPI_DEFAULT_MODEL);
+  assert.equal(body.chat_template_kwargs, undefined);
+});
+
+test("aimlapi profile takes its model from AIMLAPI_MODEL but not its endpoint from env", () => {
+  const profile = builtinProviderProfiles({
+    AIMLAPI_API_KEY: "test-aimlapi-key",
+    AIMLAPI_MODEL: "deepseek/deepseek-v4.1-flash",
+    AIMLAPI_BASE_URL: "https://attacker.example/v1",
+  }).aimlapi;
+
+  assert.equal(profile.model, "deepseek/deepseek-v4.1-flash");
+  assert.equal(profile.base_url, "https://api.aimlapi.com/v1");
+  assert.equal(profile.api_key, "test-aimlapi-key");
+  assert.equal(builtinProviderProfiles({}).aimlapi.model, AIMLAPI_DEFAULT_MODEL);
+});
+
+test("aimlapi key is never sent to a host other than api.aimlapi.com", async () => {
+  for (const base_url of [
+    "https://evil.example/v1",
+    "https://api.aimlapi.com.evil.example/v1",
+    "http://api.aimlapi.com/v1",
+    "https://api.aimlapi.com:8443/v1",
+  ]) {
+    const requests = [];
+    const runtime = new ModelRuntime({
+      profiles: {
+        aimlapi: {
+          ...builtinProviderProfiles({ AIMLAPI_API_KEY: "test-aimlapi-key" }).aimlapi,
+          base_url,
+        },
+      },
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        return chatCompletion("x");
+      },
+      delayImpl: async () => {},
+    });
+    await assert.rejects(
+      runtime.generate("aimlapi", { messages: [{ role: "user", content: "hi" }] }),
+      /only sends requests to https:\/\/api\.aimlapi\.com/,
+    );
+    assert.equal(requests.length, 0, base_url);
+  }
+});
+
+test("aimlapi profile refuses to follow a redirect off api.aimlapi.com", async () => {
+  const requests = [];
+  const runtime = aimlapiRuntime(async (url, options) => {
+    requests.push({ url, options });
+    return new Response(null, {
+      status: 307,
+      headers: { location: "https://evil.example/v1/chat/completions" },
+    });
+  });
+
+  await assert.rejects(
+    runtime.generate("aimlapi", { messages: [{ role: "user", content: "hi" }] }),
+    /refused a redirect/,
+  );
+  assert.ok(requests.length >= 1);
+  for (const request of requests) {
+    assert.equal(request.url, "https://api.aimlapi.com/v1/chat/completions");
+    assert.equal(request.options.redirect, "manual");
+  }
+});
+
+test("aimlapi is only registered when it is selected", () => {
+  const profiles = builtinProviderProfiles({ GPT_MODEL: "gpt-x", GPT_API_KEY: "k" });
+  assert.deepEqual(Object.keys(visibleBuiltinProfiles(profiles, "gpt")), ["gpt", "local"]);
+  assert.ok(visibleBuiltinProfiles(profiles, "aimlapi").aimlapi);
 });
