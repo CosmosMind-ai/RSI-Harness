@@ -211,6 +211,18 @@ function buildHeaders(profile) {
   return headers;
 }
 
+// A profile with `allowed_host` only talks HTTPS to exactly that host, so its
+// key cannot leak through a mistyped base URL or a redirect.
+function assertAllowedHost(profile, endpoint) {
+  if (!profile.allowed_host) return;
+  const url = new URL(endpoint);
+  if (url.protocol !== "https:" || url.host !== profile.allowed_host) {
+    throw new Error(
+      `Provider profile "${profile.id}" only sends requests to https://${profile.allowed_host}.`,
+    );
+  }
+}
+
 function isRequestTimeout(error) {
   for (let current = error; current; current = current.cause) {
     if (
@@ -664,14 +676,25 @@ export class ModelRuntime {
     while (true) {
       try {
         if (signal?.aborted) throw signal.reason;
+        assertAllowedHost(profile, endpoint);
         const response = await this.fetchImpl(endpoint, {
           method: "POST",
           headers: buildHeaders(profile),
           body: JSON.stringify(payload),
+          ...(profile.allowed_host ? { redirect: "manual" } : {}),
           signal: signal
             ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
             : AbortSignal.timeout(timeoutMs),
         });
+        if (
+          profile.allowed_host &&
+          (response.type === "opaqueredirect" ||
+            (response.status >= 300 && response.status < 400))
+        ) {
+          throw new Error(
+            `Provider profile "${profile.id}" refused a redirect away from ${endpoint}.`,
+          );
+        }
         const text = await response.text();
         return {
           response,

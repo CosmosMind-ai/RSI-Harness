@@ -27,7 +27,7 @@ RSIH 完全可以从命令行驱动——不需要终端 UI。本页是给程序
 | 选项 | 含义 |
 | --- | --- |
 | `--genome <name\|path>` | 要跑的 Genome。简写：`rsih :name`、`::name`、`+name`——只在**第一个参数**位置识别。裸名字依次查 `./.rsih/genomes`、`~/.rsih/genomes`、内置种子；路径直接加载 |
-| `--profile <name>` | `--config` 里的 provider profile；同时设置 Pi 的 `--provider` |
+| `--profile <name>` | `--config` 里的 provider profile，或内建的 `gpt` / `local` / `aimlapi`；同时设置 Pi 的 `--provider` |
 | `--config <file>` | provider profile JSON（自定义模型端点） |
 | `--env <file>` | 要加载的 env 文件；默认是 `--cwd` 下的 `./.env` |
 | `--cwd <dir>` | 本次运行的工作目录；同时决定 session 落在哪。符号链接会被解析，落盘的 session 路径是规范路径 |
@@ -173,6 +173,10 @@ stdin-EOF 规则在这里不适用——stdin 就是命令流。
   通常放这里。
 - provider 来自内建目录加上 `--config` 的 profile JSON；`rsih auth` 检查凭据
   就绪情况，`rsih --list-models` 列出模型。
+- `--profile aimlapi` 通过 [AI/ML API](https://aimlapi.com) 的 OpenAI 兼容端点
+  `https://api.aimlapi.com/v1` 运行。key 取自 `AIMLAPI_API_KEY`；`AIMLAPI_MODEL`
+  可选 `https://api.aimlapi.com/v1/models` 里的任意 chat 模型（默认
+  `openai/gpt-6-luna`）。key 只发往 `api.aimlapi.com`，不跟随重定向。
 - `PI_PACKAGE_DIR` 是 RSIH 找内置 Genome 种子的地方；通常由启动器自己设置。
 
 ## Genome 命令

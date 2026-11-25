@@ -325,7 +325,11 @@ function mockResponsesFromProfiles(profiles) {
   );
 }
 
-function builtinProviderProfiles() {
+// AI/ML API's chat model used when AIMLAPI_MODEL is not set. Picked from
+// https://api.aimlapi.com/v1/models (type openai/chat-completions, with tools).
+export const AIMLAPI_DEFAULT_MODEL = "openai/gpt-6-luna";
+
+export function builtinProviderProfiles(environment = process.env) {
   return {
     gpt: resolveProviderProfile("gpt", {
       kind: "http",
@@ -343,7 +347,7 @@ function builtinProviderProfiles() {
         images: false,
         usage: true,
       },
-    }),
+    }, environment),
     local: resolveProviderProfile("local", {
       kind: "http",
       api: "openai-completions",
@@ -365,8 +369,39 @@ function builtinProviderProfiles() {
         images: false,
         usage: true,
       },
-    }),
+    }, environment),
+    // The endpoint is fixed rather than read from the environment, so the
+    // AI/ML API key is only ever sent to api.aimlapi.com.
+    aimlapi: resolveProviderProfile("aimlapi", {
+      kind: "http",
+      api: "openai-completions",
+      provider: "aimlapi",
+      model: environment.AIMLAPI_MODEL || AIMLAPI_DEFAULT_MODEL,
+      base_url: "https://api.aimlapi.com/v1",
+      api_key_env: "AIMLAPI_API_KEY",
+      allowed_host: "api.aimlapi.com",
+      max_tokens: 16384,
+      compat: { supportsStrictMode: false },
+      capabilities: {
+        tools: true,
+        structured_output: false,
+        streaming: false,
+        reasoning: true,
+        images: false,
+        usage: true,
+      },
+    }, environment),
   };
+}
+
+/**
+ * The aimlapi profile always resolves a model, so it is only registered when it
+ * is asked for. Users of `gpt`/`local` see no new provider.
+ */
+export function visibleBuiltinProfiles(profiles, selectedProfile, fromConfig = false) {
+  if (fromConfig || selectedProfile === "aimlapi") return profiles;
+  const { aimlapi, ...rest } = profiles;
+  return rest;
 }
 
 function messageText(content) {
@@ -1399,8 +1434,9 @@ export async function runPiCli(argv) {
   }
 
   const customProfiles =
-    parsed.config || (selectedProfile && ["gpt", "local"].includes(selectedProfile))
-      ? profiles
+    parsed.config ||
+    (selectedProfile && ["gpt", "local", "aimlapi"].includes(selectedProfile))
+      ? visibleBuiltinProfiles(profiles, selectedProfile, Boolean(parsed.config))
       : {};
   if (selectedProfile && parsed.config && !profiles[selectedProfile]) {
     throw new Error(
